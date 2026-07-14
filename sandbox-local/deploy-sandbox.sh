@@ -324,6 +324,7 @@ ZRCL=$(jq -r '.contracts.zeracleToken' "$L2_DIR/deployment.json")
 BRIDGE_L2=$(jq -r '.contracts.tokenBridge' "$L2_DIR/deployment.json")
 FEE_DIST=$(jq -r '.contracts.feeDistribution' "$L2_DIR/deployment.json")
 PAYMENT_ESCROW=$(jq -r '.contracts.paymentEscrow' "$L2_DIR/deployment.json")
+COMPLIANCE=$(jq -r '.contracts.compliance' "$L2_DIR/deployment.json")
 TOKEN_PORTAL=$(jq -r '.tokenPortal' "$L1_DIR/deployments/bridge.json")
 
 # L1 FeeJuicePortal + fee asset — needed by the chain-view admin panel to
@@ -363,6 +364,7 @@ VITE_BRIDGE_CONTRACT_ADDRESS=$BRIDGE_L2
 VITE_FEE_DISTRIBUTION_ADDRESS=$FEE_DIST
 VITE_PAYMENT_ESCROW_ADDRESS=$PAYMENT_ESCROW
 VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
+VITE_COMPLIANCE_CONTRACT_ADDRESS=$COMPLIANCE
 
 # L1 Mock Token (LUSD — pool reserve / fee token)
 VITE_LUSD_L1_ADDRESS=$LUSD
