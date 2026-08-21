@@ -277,6 +277,18 @@ step "Deploying canonical HandshakeRegistry (enables private note discovery)..."
 yarn deploy:handshake
 ok "HandshakeRegistry ready (canonical address)"
 
+# Fund the Zeracle SponsoredFPC (local only). deploy.ts leaves it unfunded on
+# purpose (treasury is a separate concern; on EC2 the admin tops it up from
+# chain-view). Since the aztec 5.2.0 upgrade the web app deploys accounts
+# in-browser through this FPC, so a local stack with an empty FPC rejects the
+# very first user action ("Insufficient fee payer balance"). Mint + bridge the
+# faucet amount and claim it for the FPC as the sandbox deployer.
+if [ "$CHAIN_HOST_HEADLESS" = 0 ]; then
+  step "Funding Zeracle SponsoredFPC with fee juice (local dev)..."
+  yarn fund:fpc
+  ok "SponsoredFPC funded"
+fi
+
 # Dump the sandbox's deterministic Schnorr test accounts (address + secret +
 # signing key) into a shell variable — later embedded directly into the
 # deployment manifest under l2.testAccounts so developers can copy a signing
@@ -448,8 +460,11 @@ fi
 # ===========================================================================
 
 step "Wiping stale PXE/wallet LMDB state..."
-rm -rf "$SERVER_DIR"/pxe_data_* "$SERVER_DIR"/wallet_data_* \
-       "$L2_DIR"/pxe_data_*   "$L2_DIR"/wallet_data_* 2>/dev/null || true
+# aztec >= 5.0.1: the embedded wallet roots its LMDB stores under
+# ./aztec-wallet-data/ (per-chain sub-stores) instead of cwd-relative
+# pxe_data_*/wallet_data_* — wipe both layouts.
+rm -rf "$SERVER_DIR"/pxe_data_* "$SERVER_DIR"/wallet_data_* "$SERVER_DIR"/aztec-wallet-data \
+       "$L2_DIR"/pxe_data_*   "$L2_DIR"/wallet_data_*   "$L2_DIR"/aztec-wallet-data 2>/dev/null || true
 ok "Stale PXE state cleared"
 
 # ===========================================================================
@@ -654,7 +669,7 @@ echo ""
 echo -e "  ${BLUE}Manifest:${NC}              ./deployments/sandbox-local/deployment-manifest.json"
 echo ""
 echo -e "  ${YELLOW}Next steps:${NC}"
-echo -e "    1. Clear browser IndexedDB"
+echo -e "    1. Clear the site's browser storage (OPFS + IndexedDB) if you used an older chain"
 echo -e "    2. cd chain-server && npm start  ${BLUE}# run manually in its own terminal${NC}"
 echo -e "    3. cd interfaces/apps/web && yarn dev"
 echo -e "    4. Open http://localhost:5173"
