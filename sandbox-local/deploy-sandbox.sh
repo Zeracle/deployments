@@ -605,6 +605,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "pxeUrl": "$(jq -r '.network' "$L2_DEPLOY")",
     "contracts": {
       "zeracleToken": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
+      "compliance": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
       "tokenBridge": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
       "feeDistribution": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
       "paymentEscrow": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
@@ -632,6 +633,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_FEE_JUICE_L1_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
     "VITE_FEE_ASSET_HANDLER_ADDRESS": "$(jq -r '.l1ContractAddresses.feeAssetHandler // ""' "$L2_DEPLOY")",
     "VITE_ZRCL_CONTRACT_ADDRESS": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
+    "VITE_COMPLIANCE_CONTRACT_ADDRESS": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
     "VITE_BRIDGE_CONTRACT_ADDRESS": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
     "VITE_FEE_DISTRIBUTION_ADDRESS": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
     "VITE_PAYMENT_ESCROW_ADDRESS": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
