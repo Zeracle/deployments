@@ -244,8 +244,10 @@ else
 fi
 
 step "Deploying L2 contracts (clean)..."
-yarn deploy:clean
-ok "L2 contracts deployed"
+# G1: the FeeDistribution test_* helpers are switched by a deploy-time immutable; the sandbox
+# is the only environment that turns them on (jest suites + demo seeding rely on them).
+ZERACLE_ENABLE_TEST_HELPERS=1 yarn deploy:clean
+ok "L2 contracts deployed (FeeDistribution test helpers ENABLED — sandbox only)"
 
 [ -f deployment.json ] || fail "deployment.json not created"
 ZRCL=$(jq -r '.contracts.zeracleToken' deployment.json)
