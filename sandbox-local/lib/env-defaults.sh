@@ -21,11 +21,13 @@ load_env_defaults() {
     line="${line#export }"
     key="${line%%=*}"
     value="${line#*=}"
+    value="${value%$'\r'}"                          # strip trailing CR (CRLF files)
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     if [ -z "${!key+x}" ]; then                    # unset in caller → take the file's value
       case "$value" in
         \"*\") value="${value#\"}"; value="${value%\"}" ;;
         \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        *) value="${value%%[[:space:]]#*}" ;;       # unquoted only: strip trailing ` # comment`
       esac
       export "$key=$value"
     fi

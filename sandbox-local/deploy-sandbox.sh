@@ -55,6 +55,12 @@ load_env_defaults "$L1_DIR/.env.local"
 : "${ETH_RPC_URL:=http://localhost:8545}"
 export DEPLOYER_PRIVATE_KEY ETH_RPC_URL
 
+# G17: the caller's environment now wins over .env files, so a DEPLOYER_PRIVATE_KEY
+# left exported from another environment (e.g. after deploy-testnet.sh) is honoured.
+if [ "$DEPLOYER_PRIVATE_KEY" != "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" ]; then
+  echo "WARN: DEPLOYER_PRIVATE_KEY is not the anvil default — using the caller's key for the sandbox deploy." >&2
+fi
+
 SKIP_INFRA=false
 if [ "$1" = "--skip-infra" ]; then
   SKIP_INFRA=true

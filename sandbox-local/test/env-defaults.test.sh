@@ -22,9 +22,11 @@ export EXPORTED_FORM=from_file
 QUOTED="quoted value"
 SINGLE='single value'
 NOT_A_VAR-BAD=ignored
+TRAILING_COMMENT=val # note
 EOF
+printf 'CRLF_VAL=abc\r\n' >>"$tmp"
 
-unset UNSET_IN_CALLER EXPORTED_FORM QUOTED SINGLE
+unset UNSET_IN_CALLER EXPORTED_FORM QUOTED SINGLE TRAILING_COMMENT CRLF_VAL
 export EMPTY_IN_CALLER=""
 export SET_IN_CALLER=from_caller
 
@@ -36,6 +38,8 @@ check "exported non-empty var wins"               "from_caller"   "$SET_IN_CALLE
 check "'export KEY=VAL' form accepted"            "from_file"     "${EXPORTED_FORM-<unset>}"
 check "double-quoted value is unquoted"           "quoted value"  "${QUOTED-<unset>}"
 check "single-quoted value is unquoted"           "single value"  "${SINGLE-<unset>}"
+check "trailing comment stripped (unquoted)"      "val"           "${TRAILING_COMMENT-<unset>}"
+check "trailing CR stripped (CRLF file)"          "abc"           "${CRLF_VAL-<unset>}"
 check "file values are exported to children"      "from_file"     "$(bash -c 'printf %s "${UNSET_IN_CALLER-<unset>}"')"
 check "missing file is a no-op (exit 0)"          "0"             "$(load_env_defaults /nonexistent/.env; echo $?)"
 
