@@ -53,16 +53,6 @@ load_env_defaults "$L1_DIR/.env.local"
 # manual env setup. Override via .env or v1-l1/.env.local for production.
 : "${DEPLOYER_PRIVATE_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 
-# Governance (G3): admin-controlled until GOV_TRANSITION_SECONDS after deploy, then the
-# GOV_PROPOSER Safe behind a GOV_TIMELOCK_DELAY timelock. Sandbox defaults: 365 d / 1 h, and
-# proposer == guardian == deployer (a real Safe is a testnet/mainnet requirement, not a sandbox one).
-: "${GOV_TRANSITION_SECONDS:=31536000}"
-: "${GOV_TIMELOCK_DELAY:=3600}"
-DEPLOYER_ADDRESS=$(cast wallet address --private-key "$DEPLOYER_PRIVATE_KEY")
-: "${GOV_PROPOSER:=$DEPLOYER_ADDRESS}"
-: "${GOV_GUARDIAN:=$DEPLOYER_ADDRESS}"
-export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_GUARDIAN
-
 : "${ETH_RPC_URL:=http://localhost:8545}"
 export DEPLOYER_PRIVATE_KEY ETH_RPC_URL
 
@@ -107,6 +97,20 @@ step() { echo -e "\n${BLUE}==>${NC} ${1}"; }
 ok()   { echo -e "${GREEN}  ✓${NC} ${1}"; }
 warn() { echo -e "${YELLOW}  ⚠${NC} ${1}"; }
 fail() { echo -e "${RED}  ✗ ${1}${NC}"; exit 1; }
+
+# Governance (G3): admin-controlled until GOV_TRANSITION_SECONDS after deploy, then the
+# GOV_PROPOSER Safe behind a GOV_TIMELOCK_DELAY timelock. Sandbox defaults: 365 d / 1 h, and
+# proposer == guardian == deployer (a real Safe is a testnet/mainnet requirement, not a sandbox one).
+# (Moved to after the fail()/step()/ok()/warn() helpers are defined above, since the
+# deployer-address derivation below now uses fail() on error.)
+: "${GOV_TRANSITION_SECONDS:=31536000}"
+: "${GOV_TIMELOCK_DELAY:=3600}"
+if ! DEPLOYER_ADDRESS=$(cast wallet address --private-key "$DEPLOYER_PRIVATE_KEY" 2>&1); then
+  fail "Could not derive an address from DEPLOYER_PRIVATE_KEY: $DEPLOYER_ADDRESS"
+fi
+: "${GOV_PROPOSER:=$DEPLOYER_ADDRESS}"
+: "${GOV_GUARDIAN:=$DEPLOYER_ADDRESS}"
+export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_GUARDIAN
 
 wait_for_port() {
   local port=$1 name=$2 timeout=${3:-120}
@@ -332,12 +336,12 @@ make wire-bridge
 ok "Bridge wired"
 
 # ===========================================================================
-# 5b. Governance deploy + ownership handover (FINAL L1 stage — after bridge wiring,
+# 6b. Governance deploy + ownership handover (FINAL L1 stage — after bridge wiring,
 #     because wire-bridge.sh calls TokenPortal.setL2Bridge as the deployer)
 # ===========================================================================
 step "Deploying governance (authority + timelock + validator) and handing over L1 ownership..."
 cd "$L1_DIR"
-if [ "$GOV_PROPOSER" = "$DEPLOYER_ADDRESS" ]; then
+if [ "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
   echo "  WARN: GOV_PROPOSER == deployer — phase 2 is the same key. Fine for the sandbox, never for a real network." >&2
 fi
 make deploy-governance
