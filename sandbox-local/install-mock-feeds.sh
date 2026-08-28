@@ -14,25 +14,29 @@
 # bytecode: we deploy one throwaway instance per price to the running anvil,
 # read its code, then `anvil_setCode` that code at the real feed address.
 #
-# NO-OP when MAINNET_RPC_URL is set (a forked anvil already has real feeds).
+# Decides by PROBING THE CHAIN (G17): if the LUSD/USD feed address already has
+# code — a forked anvil — nothing is installed. The old MAINNET_RPC_URL check
+# trusted an env var that could disagree with the running anvil.
 #
 # Env:
 #   ETH_RPC_URL             (default http://localhost:8545)
 #   DEPLOYER_PRIVATE_KEY    (default anvil account 0)
-#   MAINNET_RPC_URL         (if set → skip; fork provides real feeds)
+#   FORCE_MOCK_FEEDS=1      install even if the feed address has code
 set -euo pipefail
 
 RPC="${ETH_RPC_URL:-http://localhost:8545}"
 KEY="${DEPLOYER_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 L1_DIR="${L1_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../v1-l1" && pwd)}"
 
-if [ -n "${MAINNET_RPC_URL:-}" ]; then
-  echo "install-mock-feeds: MAINNET_RPC_URL set (forked) — real Chainlink feeds present, skipping."
-  exit 0
-fi
-
 command -v cast >/dev/null 2>&1 || { echo "install-mock-feeds: cast not found on PATH" >&2; exit 1; }
 command -v forge >/dev/null 2>&1 || { echo "install-mock-feeds: forge not found on PATH" >&2; exit 1; }
+
+PROBE_FEED=0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0 # LUSD/USD — first row of FEEDS below
+existing=$(cast code --rpc-url "$RPC" "$PROBE_FEED")
+if [ "${FORCE_MOCK_FEEDS:-0}" != 1 ] && [ -n "$existing" ] && [ "$existing" != "0x" ]; then
+  echo "install-mock-feeds: $PROBE_FEED already has code (forked anvil or feeds installed) — skipping."
+  exit 0
+fi
 
 # Chainlink USD feeds are all 8-decimal. Prices chosen to match the frontend's
 # sandbox fallback table (interfaces/apps/web/src/services/oracle/priceOracle.ts)

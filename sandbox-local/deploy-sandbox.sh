@@ -23,9 +23,9 @@ set -e
 # Prerequisites: Docker, Node.js 18+, Yarn, Foundry (forge/cast/anvil), jq
 #
 # Environment (sandbox-local/.env is auto-loaded):
-#   MAINNET_RPC_URL  — Mainnet RPC for forking. Required for real Chainlink
-#                      price feeds (LUSD/USD, XAU/USD, etc). Without it, the
-#                      pool's oracle reads will revert.
+#   MAINNET_RPC_URL — Mainnet RPC for forking (loaded from .env only if not
+#                      already exported; export MAINNET_RPC_URL="" to force
+#                      an unforked anvil with mock feeds).
 #   FORK_BLOCK       — (optional) pin the fork to a specific block number for
 #                      deterministic deploys across runs.
 # ===========================================================================
@@ -39,30 +39,27 @@ L2_DIR="$ROOT_DIR/v1-l2"
 WEB_DIR="$ROOT_DIR/interfaces/apps/web"
 SERVER_DIR="$ROOT_DIR/chain-server"
 
-# Load .env if present (picks up MAINNET_RPC_URL for the fork). Lives at
-# sandbox-local/.env — this environment's own config, not the repo root.
-if [ -f "$SCRIPT_DIR/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/.env"
-  set +a
-fi
-
-# Also load v1-l1/.env.local so DEPLOYER_PRIVATE_KEY is available to the L2
-# deploy (the L2 fee-juice bridge step needs an L1 signer to call
-# FeeJuicePortal). Falls through silently if missing.
-if [ -f "$L1_DIR/.env.local" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$L1_DIR/.env.local"
-  set +a
-fi
+# Load sandbox-local/.env and v1-l1/.env.local as DEFAULTS only: anything the
+# caller exported — including an explicitly empty MAINNET_RPC_URL to force an
+# unforked anvil — wins (G17). `.env` lives at sandbox-local/.env, this
+# environment's own config, not the repo root; v1-l1/.env.local supplies
+# DEPLOYER_PRIVATE_KEY for the L2 fee-juice bridge step.
+# shellcheck source=lib/env-defaults.sh
+. "$SCRIPT_DIR/lib/env-defaults.sh"
+load_env_defaults "$SCRIPT_DIR/.env"
+load_env_defaults "$L1_DIR/.env.local"
 
 # Anvil default — used as a fallback so a fresh checkout works without any
 # manual env setup. Override via .env or v1-l1/.env.local for production.
 : "${DEPLOYER_PRIVATE_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 : "${ETH_RPC_URL:=http://localhost:8545}"
 export DEPLOYER_PRIVATE_KEY ETH_RPC_URL
+
+# G17: the caller's environment now wins over .env files, so a DEPLOYER_PRIVATE_KEY
+# left exported from another environment (e.g. after deploy-testnet.sh) is honoured.
+if [ "$DEPLOYER_PRIVATE_KEY" != "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" ]; then
+  echo "WARN: DEPLOYER_PRIVATE_KEY is not the anvil default — using the caller's key for the sandbox deploy." >&2
+fi
 
 SKIP_INFRA=false
 if [ "$1" = "--skip-infra" ]; then
@@ -215,13 +212,14 @@ LUSD=$(jq -r '.mockLusd' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
-# Install mock Chainlink feeds when unforked. Without a mainnet fork the real
-# feed addresses have no code, so getPrice() reverts and every deposit reverts
-# on the price read. No-op when MAINNET_RPC_URL is set (fork has real feeds).
-step "Installing mock price feeds (unforked anvil)..."
+# Install mock Chainlink feeds when the chain has none. install-mock-feeds.sh
+# probes the LUSD/USD feed address for code (a forked anvil has the real feed;
+# an unforked one has nothing and every deposit would revert on the price
+# read), so this is correct whether anvil was started here or by hand.
+step "Checking Chainlink price feeds (installs mocks on an unforked anvil)..."
 L1_DIR="$L1_DIR" ETH_RPC_URL="$ETH_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-  MAINNET_RPC_URL="${MAINNET_RPC_URL:-}" bash "$SCRIPT_DIR/install-mock-feeds.sh"
-ok "Mock price feeds ready"
+  bash "$SCRIPT_DIR/install-mock-feeds.sh"
+ok "Price feeds verified"
 
 # ===========================================================================
 # 3. Deploy L1 TokenPortal Bridge
@@ -252,8 +250,10 @@ else
 fi
 
 step "Deploying L2 contracts (clean)..."
-yarn deploy:clean
-ok "L2 contracts deployed"
+# G1: the FeeDistribution test_* helpers are switched by a deploy-time immutable; the sandbox
+# is the only environment that turns them on (jest suites + demo seeding rely on them).
+ZERACLE_ENABLE_TEST_HELPERS=1 yarn deploy:clean
+ok "L2 contracts deployed (FeeDistribution test helpers ENABLED — sandbox only)"
 
 [ -f deployment.json ] || fail "deployment.json not created"
 ZRCL=$(jq -r '.contracts.zeracleToken' deployment.json)
