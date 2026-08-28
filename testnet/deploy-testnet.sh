@@ -251,11 +251,12 @@ stage_l1_deploy() {
   ok "PAXS:  $(jq -r '.PAXS' deployments/tokens-testnet.json)"
 
   step "L1: installing mock Chainlink price feeds..."
-  # MAINNET_RPC_URL explicitly empty: Sepolia never forks mainnet, so this
-  # always takes install-mock-feeds.sh's mock-aggregator path (the same
-  # RPC-parameterized script sandbox-local uses, just pointed at Sepolia).
+  # Mock Chainlink feeds. install-mock-feeds.sh now decides by probing the chain for
+  # code at the LUSD/USD feed address (G17); it installs via anvil_setCode, which a
+  # real Sepolia RPC does not expose — this stage is a known live-run blocker until a
+  # Sepolia-native feed strategy exists (see README).
   ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-    MAINNET_RPC_URL="" L1_DIR="$L1_DIR" \
+    L1_DIR="$L1_DIR" \
     bash "$ROOT_DIR/deployments/sandbox-local/install-mock-feeds.sh"
   ok "Mock price feeds installed"
 

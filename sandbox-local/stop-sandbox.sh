@@ -21,12 +21,9 @@ L2_DIR="$ROOT_DIR/v1-l2"
 # Parity with deploy-sandbox.sh — pick up .env so future flags (e.g. fork config)
 # resolve consistently when stopping. Lives at deployments/sandbox-local/.env (moved from the
 # repo root), not the repo root itself.
-if [ -f "$ROOT_DIR/deployments/sandbox-local/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$ROOT_DIR/deployments/sandbox-local/.env"
-  set +a
-fi
+# shellcheck source=lib/env-defaults.sh
+. "$ROOT_DIR/deployments/sandbox-local/lib/env-defaults.sh"
+load_env_defaults "$ROOT_DIR/deployments/sandbox-local/.env"
 
 CLEAN_LOGS=false
 if [ "$1" = "--clean-logs" ]; then

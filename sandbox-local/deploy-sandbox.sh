@@ -23,9 +23,9 @@ set -e
 # Prerequisites: Docker, Node.js 18+, Yarn, Foundry (forge/cast/anvil), jq
 #
 # Environment (sandbox-local/.env is auto-loaded):
-#   MAINNET_RPC_URL  — Mainnet RPC for forking. Required for real Chainlink
-#                      price feeds (LUSD/USD, XAU/USD, etc). Without it, the
-#                      pool's oracle reads will revert.
+#   MAINNET_RPC_URL — Mainnet RPC for forking (loaded from .env only if not
+#                      already exported; export MAINNET_RPC_URL="" to force
+#                      an unforked anvil with mock feeds).
 #   FORK_BLOCK       — (optional) pin the fork to a specific block number for
 #                      deterministic deploys across runs.
 # ===========================================================================
@@ -39,30 +39,27 @@ L2_DIR="$ROOT_DIR/v1-l2"
 WEB_DIR="$ROOT_DIR/interfaces/apps/web"
 SERVER_DIR="$ROOT_DIR/chain-server"
 
-# Load .env if present (picks up MAINNET_RPC_URL for the fork). Lives at
-# sandbox-local/.env — this environment's own config, not the repo root.
-if [ -f "$SCRIPT_DIR/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/.env"
-  set +a
-fi
-
-# Also load v1-l1/.env.local so DEPLOYER_PRIVATE_KEY is available to the L2
-# deploy (the L2 fee-juice bridge step needs an L1 signer to call
-# FeeJuicePortal). Falls through silently if missing.
-if [ -f "$L1_DIR/.env.local" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$L1_DIR/.env.local"
-  set +a
-fi
+# Load sandbox-local/.env and v1-l1/.env.local as DEFAULTS only: anything the
+# caller exported — including an explicitly empty MAINNET_RPC_URL to force an
+# unforked anvil — wins (G17). `.env` lives at sandbox-local/.env, this
+# environment's own config, not the repo root; v1-l1/.env.local supplies
+# DEPLOYER_PRIVATE_KEY for the L2 fee-juice bridge step.
+# shellcheck source=lib/env-defaults.sh
+. "$SCRIPT_DIR/lib/env-defaults.sh"
+load_env_defaults "$SCRIPT_DIR/.env"
+load_env_defaults "$L1_DIR/.env.local"
 
 # Anvil default — used as a fallback so a fresh checkout works without any
 # manual env setup. Override via .env or v1-l1/.env.local for production.
 : "${DEPLOYER_PRIVATE_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 : "${ETH_RPC_URL:=http://localhost:8545}"
 export DEPLOYER_PRIVATE_KEY ETH_RPC_URL
+
+# G17: the caller's environment now wins over .env files, so a DEPLOYER_PRIVATE_KEY
+# left exported from another environment (e.g. after deploy-testnet.sh) is honoured.
+if [ "$DEPLOYER_PRIVATE_KEY" != "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" ]; then
+  echo "WARN: DEPLOYER_PRIVATE_KEY is not the anvil default — using the caller's key for the sandbox deploy." >&2
+fi
 
 SKIP_INFRA=false
 if [ "$1" = "--skip-infra" ]; then
@@ -215,13 +212,14 @@ LUSD=$(jq -r '.mockLusd' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
-# Install mock Chainlink feeds when unforked. Without a mainnet fork the real
-# feed addresses have no code, so getPrice() reverts and every deposit reverts
-# on the price read. No-op when MAINNET_RPC_URL is set (fork has real feeds).
-step "Installing mock price feeds (unforked anvil)..."
+# Install mock Chainlink feeds when the chain has none. install-mock-feeds.sh
+# probes the LUSD/USD feed address for code (a forked anvil has the real feed;
+# an unforked one has nothing and every deposit would revert on the price
+# read), so this is correct whether anvil was started here or by hand.
+step "Checking Chainlink price feeds (installs mocks on an unforked anvil)..."
 L1_DIR="$L1_DIR" ETH_RPC_URL="$ETH_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-  MAINNET_RPC_URL="${MAINNET_RPC_URL:-}" bash "$SCRIPT_DIR/install-mock-feeds.sh"
-ok "Mock price feeds ready"
+  bash "$SCRIPT_DIR/install-mock-feeds.sh"
+ok "Price feeds verified"
 
 # ===========================================================================
 # 3. Deploy L1 TokenPortal Bridge
@@ -252,8 +250,10 @@ else
 fi
 
 step "Deploying L2 contracts (clean)..."
-yarn deploy:clean
-ok "L2 contracts deployed"
+# G1: the FeeDistribution test_* helpers are switched by a deploy-time immutable; the sandbox
+# is the only environment that turns them on (jest suites + demo seeding rely on them).
+ZERACLE_ENABLE_TEST_HELPERS=1 yarn deploy:clean
+ok "L2 contracts deployed (FeeDistribution test helpers ENABLED — sandbox only)"
 
 [ -f deployment.json ] || fail "deployment.json not created"
 ZRCL=$(jq -r '.contracts.zeracleToken' deployment.json)
@@ -276,6 +276,18 @@ ok "SponsoredFPC:    $SPONSORED_FPC"
 step "Deploying canonical HandshakeRegistry (enables private note discovery)..."
 yarn deploy:handshake
 ok "HandshakeRegistry ready (canonical address)"
+
+# Fund the Zeracle SponsoredFPC (local only). deploy.ts leaves it unfunded on
+# purpose (treasury is a separate concern; on EC2 the admin tops it up from
+# chain-view). Since the aztec 5.2.0 upgrade the web app deploys accounts
+# in-browser through this FPC, so a local stack with an empty FPC rejects the
+# very first user action ("Insufficient fee payer balance"). Mint + bridge the
+# faucet amount and claim it for the FPC as the sandbox deployer.
+if [ "$CHAIN_HOST_HEADLESS" = 0 ]; then
+  step "Funding Zeracle SponsoredFPC with fee juice (local dev)..."
+  yarn fund:fpc
+  ok "SponsoredFPC funded"
+fi
 
 # Dump the sandbox's deterministic Schnorr test accounts (address + secret +
 # signing key) into a shell variable — later embedded directly into the
@@ -324,6 +336,7 @@ ZRCL=$(jq -r '.contracts.zeracleToken' "$L2_DIR/deployment.json")
 BRIDGE_L2=$(jq -r '.contracts.tokenBridge' "$L2_DIR/deployment.json")
 FEE_DIST=$(jq -r '.contracts.feeDistribution' "$L2_DIR/deployment.json")
 PAYMENT_ESCROW=$(jq -r '.contracts.paymentEscrow' "$L2_DIR/deployment.json")
+COMPLIANCE=$(jq -r '.contracts.compliance' "$L2_DIR/deployment.json")
 TOKEN_PORTAL=$(jq -r '.tokenPortal' "$L1_DIR/deployments/bridge.json")
 
 # L1 FeeJuicePortal + fee asset — needed by the chain-view admin panel to
@@ -363,6 +376,7 @@ VITE_BRIDGE_CONTRACT_ADDRESS=$BRIDGE_L2
 VITE_FEE_DISTRIBUTION_ADDRESS=$FEE_DIST
 VITE_PAYMENT_ESCROW_ADDRESS=$PAYMENT_ESCROW
 VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
+VITE_COMPLIANCE_CONTRACT_ADDRESS=$COMPLIANCE
 
 # L1 Mock Token (LUSD — pool reserve / fee token)
 VITE_LUSD_L1_ADDRESS=$LUSD
@@ -446,8 +460,11 @@ fi
 # ===========================================================================
 
 step "Wiping stale PXE/wallet LMDB state..."
-rm -rf "$SERVER_DIR"/pxe_data_* "$SERVER_DIR"/wallet_data_* \
-       "$L2_DIR"/pxe_data_*   "$L2_DIR"/wallet_data_* 2>/dev/null || true
+# aztec >= 5.0.1: the embedded wallet roots its LMDB stores under
+# ./aztec-wallet-data/ (per-chain sub-stores) instead of cwd-relative
+# pxe_data_*/wallet_data_* — wipe both layouts.
+rm -rf "$SERVER_DIR"/pxe_data_* "$SERVER_DIR"/wallet_data_* "$SERVER_DIR"/aztec-wallet-data \
+       "$L2_DIR"/pxe_data_*   "$L2_DIR"/wallet_data_*   "$L2_DIR"/aztec-wallet-data 2>/dev/null || true
 ok "Stale PXE state cleared"
 
 # ===========================================================================
@@ -588,6 +605,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "pxeUrl": "$(jq -r '.network' "$L2_DEPLOY")",
     "contracts": {
       "zeracleToken": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
+      "compliance": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
       "tokenBridge": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
       "feeDistribution": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
       "paymentEscrow": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
@@ -615,6 +633,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_FEE_JUICE_L1_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
     "VITE_FEE_ASSET_HANDLER_ADDRESS": "$(jq -r '.l1ContractAddresses.feeAssetHandler // ""' "$L2_DEPLOY")",
     "VITE_ZRCL_CONTRACT_ADDRESS": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
+    "VITE_COMPLIANCE_CONTRACT_ADDRESS": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
     "VITE_BRIDGE_CONTRACT_ADDRESS": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
     "VITE_FEE_DISTRIBUTION_ADDRESS": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
     "VITE_PAYMENT_ESCROW_ADDRESS": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
@@ -652,7 +671,7 @@ echo ""
 echo -e "  ${BLUE}Manifest:${NC}              ./deployments/sandbox-local/deployment-manifest.json"
 echo ""
 echo -e "  ${YELLOW}Next steps:${NC}"
-echo -e "    1. Clear browser IndexedDB"
+echo -e "    1. Clear the site's browser storage (OPFS + IndexedDB) if you used an older chain"
 echo -e "    2. cd chain-server && npm start  ${BLUE}# run manually in its own terminal${NC}"
 echo -e "    3. cd interfaces/apps/web && yarn dev"
 echo -e "    4. Open http://localhost:5173"
