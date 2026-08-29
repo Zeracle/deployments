@@ -110,7 +110,10 @@ if ! DEPLOYER_ADDRESS=$(cast wallet address --private-key "$DEPLOYER_PRIVATE_KEY
 fi
 : "${GOV_PROPOSER:=$DEPLOYER_ADDRESS}"
 : "${GOV_GUARDIAN:=$DEPLOYER_ADDRESS}"
-export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_GUARDIAN
+# D1: break-glass second proposer. Optional on the sandbox (default none ->
+# single proposer); testnet/mainnet require it (see deploy-testnet.sh).
+: "${GOV_PROPOSER_2:=}"
+export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_GUARDIAN GOV_PROPOSER_2
 
 wait_for_port() {
   local port=$1 name=$2 timeout=${3:-120}
@@ -344,7 +347,10 @@ cd "$L1_DIR"
 if [ "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
   echo "  WARN: GOV_PROPOSER == deployer — phase 2 is the same key. Fine for the sandbox, never for a real network." >&2
 fi
-make deploy-governance
+# GOV_PROPOSER_2 is already exported above; passed explicitly here too so the
+# intent (D1 break-glass second proposer, optional on the sandbox) is visible
+# at the call site.
+GOV_PROPOSER_2="$GOV_PROPOSER_2" make deploy-governance
 [ -f deployments/governance.json ] || fail "deployments/governance.json not created"
 GOV_AUTHORITY=$(jq -r '.authority' deployments/governance.json)
 GOV_TIMELOCK=$(jq -r '.timelock' deployments/governance.json)
@@ -631,6 +637,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "admin": "$(jq -r '.admin' "$L1_GOV")",
       "guardian": "$(jq -r '.guardian' "$L1_GOV")",
       "proposer": "$(jq -r '.proposer' "$L1_GOV")",
+      "proposer2": "$(jq -r '.proposer2' "$L1_GOV")",
       "transitionAt": $(jq -r '.transitionAt' "$L1_GOV"),
       "timelockDelay": $(jq -r '.timelockDelay' "$L1_GOV"),
       "executionWindow": $(jq -r '.executionWindow' "$L1_GOV")
