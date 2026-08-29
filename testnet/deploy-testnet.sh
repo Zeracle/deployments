@@ -424,6 +424,11 @@ stage_governance_handover() {
   # safe here: once expanded it becomes the literal word `NAME=value`,
   # which bash parses as the COMMAND NAME, not an env assignment -> "command
   # not found" (exit 127) whenever the var is set.)
+  # The verify-tolerance check below must only ever see a file written by
+  # THIS run: a failure before forge rewrites the file would otherwise leave
+  # a stale governance-testnet.json from a previous run, whose .authority
+  # still has code on-chain -> a false "the broadcast landed" warning.
+  rm -f deployments/governance-testnet.json
   if ! ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
     GOV_PROPOSER="$GOV_PROPOSER" GOV_PROPOSER_2="$GOV_PROPOSER_2" GOV_GUARDIAN="$GOV_GUARDIAN" \
     GOV_TRANSITION_SECONDS="$GOV_TRANSITION_SECONDS" GOV_TIMELOCK_DELAY="$GOV_TIMELOCK_DELAY" \

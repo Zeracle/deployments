@@ -102,10 +102,10 @@ fail() { echo -e "${RED}  ✗ ${1}${NC}"; exit 1; }
 # GOV_PROPOSER Safe behind a GOV_TIMELOCK_DELAY timelock. Sandbox defaults: 365 d / 1 h.
 # The contract base rejects proposer == admin, so proposer/guardian can no longer default
 # to the deployer: they default to two of the anvil dev accounts instead — deployer
-# (account #0) = admin, account #2 = Safe stand-in (GOV_PROPOSER), account #3 = guardian
-# (GOV_GUARDIAN). All three keys/addresses are well-known anvil defaults and are also
-# listed in the generated manifest's "accounts" array. A real Safe is a testnet/mainnet
-# requirement, not a sandbox one.
+# (account #1, 0x7099…, from v1-l1/.env.local which the make target re-sources) = admin,
+# account #2 = Safe stand-in (GOV_PROPOSER), account #3 = guardian (GOV_GUARDIAN). All
+# three keys/addresses are well-known anvil defaults and are also listed in the generated
+# manifest's "accounts" array. A real Safe is a testnet/mainnet requirement, not a sandbox one.
 # (Moved to after the fail()/step()/ok()/warn() helpers are defined above, since the
 # deployer-address derivation below now uses fail() on error.)
 : "${GOV_TRANSITION_SECONDS:=31536000}"
@@ -362,6 +362,8 @@ cd "$L1_DIR"
 # over from an earlier upgrade run in this shell must not leak into a fresh
 # governance deploy here.
 unset GOV_AUTHORITY GOV_TIMELOCK GOV_VALIDATOR
+# The existence check below must only ever see a file written by THIS run.
+rm -f deployments/governance.json
 GOV_PROPOSER_2="$GOV_PROPOSER_2" make deploy-governance
 [ -f deployments/governance.json ] || fail "deployments/governance.json not created"
 GOV_AUTHORITY=$(jq -r '.authority' deployments/governance.json)
