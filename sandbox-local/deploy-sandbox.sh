@@ -99,8 +99,13 @@ warn() { echo -e "${YELLOW}  ⚠${NC} ${1}"; }
 fail() { echo -e "${RED}  ✗ ${1}${NC}"; exit 1; }
 
 # Governance (G3): admin-controlled until GOV_TRANSITION_SECONDS after deploy, then the
-# GOV_PROPOSER Safe behind a GOV_TIMELOCK_DELAY timelock. Sandbox defaults: 365 d / 1 h, and
-# proposer == guardian == deployer (a real Safe is a testnet/mainnet requirement, not a sandbox one).
+# GOV_PROPOSER Safe behind a GOV_TIMELOCK_DELAY timelock. Sandbox defaults: 365 d / 1 h.
+# The contract base rejects proposer == admin, so proposer/guardian can no longer default
+# to the deployer: they default to two of the anvil dev accounts instead — deployer
+# (account #0) = admin, account #2 = Safe stand-in (GOV_PROPOSER), account #3 = guardian
+# (GOV_GUARDIAN). All three keys/addresses are well-known anvil defaults and are also
+# listed in the generated manifest's "accounts" array. A real Safe is a testnet/mainnet
+# requirement, not a sandbox one.
 # (Moved to after the fail()/step()/ok()/warn() helpers are defined above, since the
 # deployer-address derivation below now uses fail() on error.)
 : "${GOV_TRANSITION_SECONDS:=31536000}"
@@ -108,8 +113,11 @@ fail() { echo -e "${RED}  ✗ ${1}${NC}"; exit 1; }
 if ! DEPLOYER_ADDRESS=$(cast wallet address --private-key "$DEPLOYER_PRIVATE_KEY" 2>&1); then
   fail "Could not derive an address from DEPLOYER_PRIVATE_KEY: $DEPLOYER_ADDRESS"
 fi
-: "${GOV_PROPOSER:=$DEPLOYER_ADDRESS}"
-: "${GOV_GUARDIAN:=$DEPLOYER_ADDRESS}"
+: "${GOV_PROPOSER:=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC}"  # anvil #2
+: "${GOV_GUARDIAN:=0x90F79bf6EB2c4f870365E785982E1f101E93b906}"  # anvil #3
+if [ "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
+  fail "GOV_PROPOSER equals the deployer/admin address — the timelock proposer must not be the deployer/admin key."
+fi
 # D1: break-glass second proposer. Optional on the sandbox (default none ->
 # single proposer); testnet/mainnet require it (see deploy-testnet.sh).
 : "${GOV_PROPOSER_2:=}"
@@ -344,12 +352,16 @@ ok "Bridge wired"
 # ===========================================================================
 step "Deploying governance (authority + timelock + validator) and handing over L1 ownership..."
 cd "$L1_DIR"
-if [ "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
-  echo "  WARN: GOV_PROPOSER == deployer — phase 2 is the same key. Fine for the sandbox, never for a real network." >&2
-fi
+# GOV_PROPOSER == deployer is already rejected (fail) when the governance
+# defaults are set up above, so no proposer/deployer check is needed here.
 # GOV_PROPOSER_2 is already exported above; passed explicitly here too so the
 # intent (D1 break-glass second proposer, optional on the sandbox) is visible
 # at the call site.
+# Unset GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR before this call: those
+# names are also used by Upgrade.s.sol sessions, and a stale export left
+# over from an earlier upgrade run in this shell must not leak into a fresh
+# governance deploy here.
+unset GOV_AUTHORITY GOV_TIMELOCK GOV_VALIDATOR
 GOV_PROPOSER_2="$GOV_PROPOSER_2" make deploy-governance
 [ -f deployments/governance.json ] || fail "deployments/governance.json not created"
 GOV_AUTHORITY=$(jq -r '.authority' deployments/governance.json)
@@ -637,7 +649,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "admin": "$(jq -r '.admin' "$L1_GOV")",
       "guardian": "$(jq -r '.guardian' "$L1_GOV")",
       "proposer": "$(jq -r '.proposer' "$L1_GOV")",
-      "proposer2": "$(jq -r '.proposer2' "$L1_GOV")",
+      "proposer2": "$(jq -r '.proposer2 // ""' "$L1_GOV")",
       "transitionAt": $(jq -r '.transitionAt' "$L1_GOV"),
       "timelockDelay": $(jq -r '.timelockDelay' "$L1_GOV"),
       "executionWindow": $(jq -r '.executionWindow' "$L1_GOV")
