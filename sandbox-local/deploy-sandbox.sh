@@ -235,6 +235,8 @@ ok "L1 contracts deployed"
 POOL=$(jq -r '.liquidityPoolProxy' deployments/local.json)
 ADAPTER=$(jq -r '.depositAdapter' deployments/local.json)
 LUSD=$(jq -r '.mockLusd' deployments/local.json)
+TREASURY=$(jq -r '.treasury' deployments/local.json)
+INSURANCE_FUND=$(jq -r '.insuranceFund' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
@@ -278,7 +280,8 @@ fi
 step "Deploying L2 contracts (clean)..."
 # G1: the FeeDistribution test_* helpers are switched by a deploy-time immutable; the sandbox
 # is the only environment that turns them on (jest suites + demo seeding rely on them).
-ZERACLE_ENABLE_TEST_HELPERS=1 yarn deploy:clean
+# real L1 fee sinks for flush_fees_to_l1 → TokenPortal.claimFees
+ZERACLE_ENABLE_TEST_HELPERS=1 L1_TOKEN_PORTAL="$TOKEN_PORTAL" L1_TREASURY="$TREASURY" L1_INSURANCE_FUND="$INSURANCE_FUND" yarn deploy:clean
 ok "L2 contracts deployed (FeeDistribution test helpers ENABLED — sandbox only)"
 
 [ -f deployment.json ] || fail "deployment.json not created"
@@ -447,8 +450,8 @@ CHAIN_VIEW_ENV="$ROOT_DIR/chain-view/.env.local"
 # Additional L1 addresses chain-view needs
 WITHDRAWAL_ADAPTER=$(jq -r '.withdrawalAdapter'  "$L1_DIR/deployments/local.json")
 BRIDGE_GUARD=$(jq       -r '.bridgeGuard'        "$L1_DIR/deployments/local.json")
-TREASURY=$(jq           -r '.treasury'           "$L1_DIR/deployments/local.json")
-INSURANCE_FUND=$(jq     -r '.insuranceFund'      "$L1_DIR/deployments/local.json")
+# TREASURY/INSURANCE_FUND are read earlier (stage 2, right after LUSD) so they're
+# available for the L2 deploy's L1_TREASURY/L1_INSURANCE_FUND env vars.
 
 # All token addresses from tokens.json
 USDT=$(jq -r '.USDT' "$L1_DIR/deployments/tokens.json")
