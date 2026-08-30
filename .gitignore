@@ -1,0 +1,13 @@
+# Secrets hygiene (B8, testnet-readiness-review.md §2). These patterns catch
+# any per-network .env / deployer key file added from here on, without a
+# `git add -A` accidentally committing a funded private key.
+#
+# NOTE: sandbox-local/.env is ALREADY TRACKED (holds a keyed RPC URL, no
+# private key) from before this .gitignore existed. Adding these patterns
+# does NOT untrack it — that's a deliberate no-op here; untracking it is the
+# repo owner's call, not made in this change.
+*/.env
+*/.env.*
+!*/.env.example
+*/deployer-account.json
+**/.env.local

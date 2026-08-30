@@ -253,6 +253,27 @@ ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
 ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
 ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
 
+step "Preflight: checking prebuilt L2 artifacts + web env template..."
+# Hoisted from stage_l2_deploy/stage_manifest_sync (same fail messages) so a
+# missing prebuilt artifact or template file is caught here, before the
+# confirmation prompt, instead of after Stage 1 has already broadcast L1
+# transactions. The later checks stay in place too (idempotent) in case this
+# script is ever invoked past preflight without going through main().
+[ -f "$L2_DIR/artifacts/index.ts" ] || fail "v1-l2/artifacts/index.ts is missing. Testnet deploys never build Noir on the fly (same rule as deploy-sandbox.sh's headless branch) — run 'yarn build' once and ship the resulting artifacts/ + target/ directories before running this script."
+[ -n "$(ls "$L2_DIR"/target/*.json 2>/dev/null)" ] || fail "v1-l2/target/*.json is missing. Compiled Noir artifacts must already be present — run 'yarn build' first."
+ok "Prebuilt L2 artifacts present (artifacts/index.ts, target/*.json)"
+
+WEB_ENV="$WEB_DIR/.env.testnet"
+[ -f "$WEB_ENV" ] || fail "$WEB_ENV not found. It must exist (with the placeholder VITE_* keys already in place) before this script can sync addresses into it."
+ok "Web env template present ($WEB_ENV)"
+
+step "Preflight: checking optional ETHERSCAN_API_KEY..."
+if [ -n "${ETHERSCAN_API_KEY:-}" ]; then
+  ok "ETHERSCAN_API_KEY is set — forge --verify will attempt Etherscan verification on the L1 targets"
+else
+  warn "ETHERSCAN_API_KEY is not set — forge --verify will be skipped/will fail on the L1 targets; contracts still deploy, just unverified on Etherscan. See testnet/.env.example."
+fi
+
 step "Preflight summary"
 cat <<SUMMARY
 
@@ -270,6 +291,7 @@ cat <<SUMMARY
   L1 Rollup address:            $L1_ROLLUP_ADDRESS
   L1 Registry address:          $L1_REGISTRY_ADDRESS
   L1 FeeJuicePortal address:    $L1_FEE_JUICE_PORTAL_ADDRESS
+  ETHERSCAN_API_KEY set:        $([ -n "${ETHERSCAN_API_KEY:-}" ] && echo "yes (--verify will run on L1 targets)" || echo "no (contracts deploy unverified)")
 
 SUMMARY
 
@@ -358,9 +380,12 @@ stage_l1_deploy() {
 # be prebuilt and shipped. yarn deploy:clean is Task 3's env-driven
 # fee-juice bootstrap: AZTEC_RPC_HOST/L1_RPC_URL/L1_DEPLOYER_PRIVATE_KEY/
 # L1_FEE_JUICE_PORTAL_ADDRESS/DEPLOY_TX_TIMEOUT_SECS all come from the
-# preflight-exported and .env-loaded vars above. DEPLOYER_ACCOUNT_FILE (Task
-# 4) tells deploy.ts's isTestnetL1Mode() branch where to persist/reload the
-# real testnet deployer keypair (sandbox has no such file — it uses the
+# preflight-exported and .env-loaded vars above. ETH_CHAIN_ID=11155111 is
+# passed explicitly (B6) so v1-l2/utils/fee_juice.ts builds its viem client
+# for sepolia instead of defaulting to foundry (31337) — without it,
+# EIP-155-signed txs get rejected by a real testnet RPC. DEPLOYER_ACCOUNT_FILE
+# (Task 4) tells deploy.ts's isTestnetL1Mode() branch where to persist/reload
+# the real testnet deployer keypair (sandbox has no such file — it uses the
 # canonical pre-deployed test account instead, unaffected by this var).
 #
 # After the L2 contracts land, wires the freshly deployed L2 TokenBridge into
@@ -385,6 +410,7 @@ stage_l2_deploy() {
     L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
     L1_FEE_JUICE_PORTAL_ADDRESS="$L1_FEE_JUICE_PORTAL_ADDRESS" \
     DEPLOY_TX_TIMEOUT_SECS=600 \
+    ETH_CHAIN_ID=11155111 \
     yarn deploy:clean
   [ -f deployment.json ] || fail "v1-l2/deployment.json was not created by 'yarn deploy:clean'. Check the deploy output above for the actual failure."
 
