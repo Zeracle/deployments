@@ -52,6 +52,7 @@ load_env_defaults "$L1_DIR/.env.local"
 # Anvil default — used as a fallback so a fresh checkout works without any
 # manual env setup. Override via .env or v1-l1/.env.local for production.
 : "${DEPLOYER_PRIVATE_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+
 : "${ETH_RPC_URL:=http://localhost:8545}"
 export DEPLOYER_PRIVATE_KEY ETH_RPC_URL
 
@@ -96,6 +97,31 @@ step() { echo -e "\n${BLUE}==>${NC} ${1}"; }
 ok()   { echo -e "${GREEN}  ✓${NC} ${1}"; }
 warn() { echo -e "${YELLOW}  ⚠${NC} ${1}"; }
 fail() { echo -e "${RED}  ✗ ${1}${NC}"; exit 1; }
+
+# Governance (G3): admin-controlled until GOV_TRANSITION_SECONDS after deploy, then the
+# GOV_PROPOSER Safe behind a GOV_TIMELOCK_DELAY timelock. Sandbox defaults: 365 d / 1 h.
+# The contract base rejects proposer == admin, so proposer/guardian can no longer default
+# to the deployer: they default to two of the anvil dev accounts instead — deployer
+# (account #1, 0x7099…, from v1-l1/.env.local which the make target re-sources) = admin,
+# account #2 = Safe stand-in (GOV_PROPOSER), account #3 = guardian (GOV_GUARDIAN). All
+# three keys/addresses are well-known anvil defaults and are also listed in the generated
+# manifest's "accounts" array. A real Safe is a testnet/mainnet requirement, not a sandbox one.
+# (Moved to after the fail()/step()/ok()/warn() helpers are defined above, since the
+# deployer-address derivation below now uses fail() on error.)
+: "${GOV_TRANSITION_SECONDS:=31536000}"
+: "${GOV_TIMELOCK_DELAY:=3600}"
+if ! DEPLOYER_ADDRESS=$(cast wallet address --private-key "$DEPLOYER_PRIVATE_KEY" 2>&1); then
+  fail "Could not derive an address from DEPLOYER_PRIVATE_KEY: $DEPLOYER_ADDRESS"
+fi
+: "${GOV_PROPOSER:=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC}"  # anvil #2
+: "${GOV_GUARDIAN:=0x90F79bf6EB2c4f870365E785982E1f101E93b906}"  # anvil #3
+if [ "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
+  fail "GOV_PROPOSER equals the deployer/admin address — the timelock proposer must not be the deployer/admin key."
+fi
+# D1: break-glass second proposer. Optional on the sandbox (default none ->
+# single proposer); testnet/mainnet require it (see deploy-testnet.sh).
+: "${GOV_PROPOSER_2:=}"
+export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_GUARDIAN GOV_PROPOSER_2
 
 wait_for_port() {
   local port=$1 name=$2 timeout=${3:-120}
@@ -321,6 +347,32 @@ make wire-bridge
 ok "Bridge wired"
 
 # ===========================================================================
+# 6b. Governance deploy + ownership handover (FINAL L1 stage — after bridge wiring,
+#     because wire-bridge.sh calls TokenPortal.setL2Bridge as the deployer)
+# ===========================================================================
+step "Deploying governance (authority + timelock + validator) and handing over L1 ownership..."
+cd "$L1_DIR"
+# GOV_PROPOSER == deployer is already rejected (fail) when the governance
+# defaults are set up above, so no proposer/deployer check is needed here.
+# GOV_PROPOSER_2 is already exported above; passed explicitly here too so the
+# intent (D1 break-glass second proposer, optional on the sandbox) is visible
+# at the call site.
+# Unset GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR before this call: those
+# names are also used by Upgrade.s.sol sessions, and a stale export left
+# over from an earlier upgrade run in this shell must not leak into a fresh
+# governance deploy here.
+unset GOV_AUTHORITY GOV_TIMELOCK GOV_VALIDATOR
+# The existence check below must only ever see a file written by THIS run.
+rm -f deployments/governance.json
+GOV_PROPOSER_2="$GOV_PROPOSER_2" make deploy-governance
+[ -f deployments/governance.json ] || fail "deployments/governance.json not created"
+GOV_AUTHORITY=$(jq -r '.authority' deployments/governance.json)
+GOV_TIMELOCK=$(jq -r '.timelock' deployments/governance.json)
+ok "GovernanceAuthority: $GOV_AUTHORITY (admin until $(jq -r '.transitionAt' deployments/governance.json))"
+ok "ZeracleTimelock:     $GOV_TIMELOCK (delay $(jq -r '.timelockDelay' deployments/governance.json)s)"
+cd "$ROOT_DIR"
+
+# ===========================================================================
 # 7. Update Web App Environment
 # ===========================================================================
 
@@ -498,6 +550,7 @@ step "Generating deployment manifest..."
 # Read all addresses
 L1_LOCAL="$L1_DIR/deployments/local.json"
 L1_BRIDGE="$L1_DIR/deployments/bridge.json"
+L1_GOV="$L1_DIR/deployments/governance.json"
 L1_TOKENS="$L1_DIR/deployments/tokens.json"
 L2_DEPLOY="$L2_DIR/deployment.json"
 
@@ -590,6 +643,18 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "chainlinkOracle": "$(jq -r '.chainlinkOracle' "$L1_LOCAL")",
       "uniswapTwap": "$(jq -r '.uniswapTwap' "$L1_LOCAL")",
       "mockDexAggregator": "$(jq -r '.mockDexAggregator' "$L1_LOCAL")"
+    },
+    "governance": {
+      "authority": "$(jq -r '.authority' "$L1_GOV")",
+      "timelock": "$(jq -r '.timelock' "$L1_GOV")",
+      "validator": "$(jq -r '.validator' "$L1_GOV")",
+      "admin": "$(jq -r '.admin' "$L1_GOV")",
+      "guardian": "$(jq -r '.guardian' "$L1_GOV")",
+      "proposer": "$(jq -r '.proposer' "$L1_GOV")",
+      "proposer2": "$(jq -r '.proposer2 // ""' "$L1_GOV")",
+      "transitionAt": $(jq -r '.transitionAt' "$L1_GOV"),
+      "timelockDelay": $(jq -r '.timelockDelay' "$L1_GOV"),
+      "executionWindow": $(jq -r '.executionWindow' "$L1_GOV")
     },
     "tokens": {
       "LUSD": { "address": "$(jq -r '.LUSD' "$L1_TOKENS")", "decimals": 18 },

@@ -120,6 +120,78 @@ fi
 ok "Deployer:  $DEPLOYER_ADDRESS"
 ok "Balance:   ${DEPLOYER_BALANCE_ETH} ETH (>= ${MIN_DEPLOYER_BALANCE_ETH} required)"
 
+step "Preflight: governance parameters (G3)..."
+: "${GOV_TRANSITION_SECONDS:=15552000}"   # 180 d
+: "${GOV_TIMELOCK_DELAY:=172800}"         # 48 h
+[ -n "${GOV_PROPOSER:-}" ] || fail "GOV_PROPOSER (the Safe that proposes in phase 2) is required for a testnet deploy. Set it in $SCRIPT_DIR/.env."
+[[ "$GOV_PROPOSER" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "GOV_PROPOSER ($GOV_PROPOSER) is not a 0x-prefixed 20-byte hex address."
+if [ "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
+  fail "GOV_PROPOSER equals the deployer address. Phase 2 must be a different authority (a Safe), or the transition is meaningless."
+fi
+if ! PROPOSER_CODE=$(cast code "$GOV_PROPOSER" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+  fail "Could not fetch code for GOV_PROPOSER ($GOV_PROPOSER) from $TESTNET_L1_RPC_URL: $PROPOSER_CODE"
+fi
+[ "$PROPOSER_CODE" != "0x" ] || fail "GOV_PROPOSER ($GOV_PROPOSER) has no code on Sepolia — it must be a deployed Safe, not an EOA."
+
+# D1: break-glass second proposer — a cold EOA or second Safe, so loss of the
+# primary Safe cannot freeze governance after the transition. No code check:
+# an EOA is the expected shape for this key.
+[ -n "${GOV_PROPOSER_2:-}" ] || fail "GOV_PROPOSER_2 is required for a testnet deploy — the break-glass second proposer — a cold key or second Safe — is required so loss of the Safe cannot freeze governance after T. Set it in $SCRIPT_DIR/.env."
+[[ "$GOV_PROPOSER_2" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "GOV_PROPOSER_2 ($GOV_PROPOSER_2) is not a 0x-prefixed 20-byte hex address."
+if [ "$(echo "$GOV_PROPOSER_2" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
+  fail "GOV_PROPOSER_2 equals the deployer address. The break-glass proposer must be a separate key from the deployer."
+fi
+if [ "$(echo "$GOV_PROPOSER_2" | tr '[:upper:]' '[:lower:]')" = "$(echo "$GOV_PROPOSER" | tr '[:upper:]' '[:lower:]')" ]; then
+  fail "GOV_PROPOSER_2 equals GOV_PROPOSER. The break-glass proposer must be a separate key from the primary Safe, or it provides no redundancy."
+fi
+
+# D2: guardian must be a separate key from the deployer on testnet.
+[ -n "${GOV_GUARDIAN:-}" ] || fail "GOV_GUARDIAN is required for a testnet deploy — the guardian must be a separate key from the deployer. Set it in $SCRIPT_DIR/.env."
+[[ "$GOV_GUARDIAN" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "GOV_GUARDIAN ($GOV_GUARDIAN) is not a 0x-prefixed 20-byte hex address."
+if [ "$(echo "$GOV_GUARDIAN" | tr '[:upper:]' '[:lower:]')" = "$(echo "$DEPLOYER_ADDRESS" | tr '[:upper:]' '[:lower:]')" ]; then
+  fail "GOV_GUARDIAN equals the deployer address. The guardian must be a separate key from the deployer."
+fi
+
+# D5: resumable deploy. GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR are optional,
+# but when any one is set all three must be, and each must already have code
+# on Sepolia — the script then reuses them instead of deploying fresh.
+RESUME_MODE=false
+if [ -n "${GOV_AUTHORITY:-}" ] || [ -n "${GOV_TIMELOCK:-}" ] || [ -n "${GOV_VALIDATOR:-}" ]; then
+  [ -n "${GOV_AUTHORITY:-}" ] || fail "GOV_AUTHORITY is unset but GOV_TIMELOCK/GOV_VALIDATOR is set — resume mode requires all three (GOV_AUTHORITY, GOV_TIMELOCK, GOV_VALIDATOR) to reuse a prior governance deploy."
+  [ -n "${GOV_TIMELOCK:-}" ] || fail "GOV_TIMELOCK is unset but GOV_AUTHORITY/GOV_VALIDATOR is set — resume mode requires all three (GOV_AUTHORITY, GOV_TIMELOCK, GOV_VALIDATOR) to reuse a prior governance deploy."
+  [ -n "${GOV_VALIDATOR:-}" ] || fail "GOV_VALIDATOR is unset but GOV_AUTHORITY/GOV_TIMELOCK is set — resume mode requires all three (GOV_AUTHORITY, GOV_TIMELOCK, GOV_VALIDATOR) to reuse a prior governance deploy."
+  for RESUME_PAIR in "GOV_AUTHORITY:$GOV_AUTHORITY" "GOV_TIMELOCK:$GOV_TIMELOCK" "GOV_VALIDATOR:$GOV_VALIDATOR"; do
+    RESUME_NAME="${RESUME_PAIR%%:*}"
+    RESUME_ADDR="${RESUME_PAIR#*:}"
+    [[ "$RESUME_ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "$RESUME_NAME ($RESUME_ADDR) is not a 0x-prefixed 20-byte hex address."
+    if ! RESUME_CODE=$(cast code "$RESUME_ADDR" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+      fail "Could not fetch code for $RESUME_NAME ($RESUME_ADDR) from $TESTNET_L1_RPC_URL: $RESUME_CODE"
+    fi
+    [ "$RESUME_CODE" != "0x" ] || fail "$RESUME_NAME ($RESUME_ADDR) has no code on Sepolia — resume mode requires a previously deployed contract."
+  done
+  # I2: roles cannot be changed after deployment — confirm GOV_PROPOSER and
+  # GOV_PROPOSER_2 actually hold PROPOSER_ROLE on the reused timelock, so a
+  # mistyped/mismatched resume address is caught here rather than silently
+  # producing a handover that later can't be proposed against.
+  if ! PROPOSER_ROLE=$(cast call "$GOV_TIMELOCK" "PROPOSER_ROLE()(bytes32)" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+    fail "Could not fetch PROPOSER_ROLE from GOV_TIMELOCK ($GOV_TIMELOCK) at $TESTNET_L1_RPC_URL: $PROPOSER_ROLE"
+  fi
+  for RESUME_ROLE_ADDR in "$GOV_PROPOSER" "$GOV_PROPOSER_2"; do
+    if ! HAS_ROLE=$(cast call "$GOV_TIMELOCK" "hasRole(bytes32,address)(bool)" "$PROPOSER_ROLE" "$RESUME_ROLE_ADDR" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+      fail "Could not check PROPOSER_ROLE for $RESUME_ROLE_ADDR on GOV_TIMELOCK ($GOV_TIMELOCK) at $TESTNET_L1_RPC_URL: $HAS_ROLE"
+    fi
+    [ "$HAS_ROLE" = "true" ] || fail "RESUME: $RESUME_ROLE_ADDR does not hold PROPOSER_ROLE on $GOV_TIMELOCK — use the proposer addresses the original deploy used; roles cannot be changed after deployment."
+  done
+  RESUME_MODE=true
+  ok "RESUME mode: reusing authority/timelock/validator"
+fi
+
+export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_PROPOSER_2 GOV_GUARDIAN GOV_AUTHORITY GOV_TIMELOCK GOV_VALIDATOR
+ok "GOV_PROPOSER:   $GOV_PROPOSER (contract)"
+ok "GOV_PROPOSER_2: $GOV_PROPOSER_2"
+ok "GOV_GUARDIAN:   $GOV_GUARDIAN"
+ok "Transition:     ${GOV_TRANSITION_SECONDS}s after deploy; timelock delay ${GOV_TIMELOCK_DELAY}s"
+
 step "Preflight: checking Aztec node ($AZTEC_NODE_URL)..."
 # getNodeInfo one-liner pattern (see v1-l1/Makefile's deploy-bridge target,
 # ~line 252: createAztecNodeClient from '@aztec/aztec.js/node'). Run from
@@ -188,6 +260,10 @@ cat <<SUMMARY
   AZTEC_NODE_URL:               $AZTEC_NODE_URL
   Deployer address:             $DEPLOYER_ADDRESS
   Deployer balance:             ${DEPLOYER_BALANCE_ETH} ETH
+  GOV_PROPOSER:                 $GOV_PROPOSER
+  GOV_PROPOSER_2:               $GOV_PROPOSER_2
+  GOV_TRANSITION_SECONDS:       $GOV_TRANSITION_SECONDS
+  Resume mode:                  $([ "$RESUME_MODE" = true ] && echo "yes (reusing GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR)" || echo "no (fresh governance deploy)")
   Aztec node version:           $NODE_VERSION
   Local SDK version:            $LOCAL_SDK_VERSION
   L1 Inbox address:             $L1_INBOX_ADDRESS
@@ -336,6 +412,47 @@ stage_l2_deploy() {
 }
 
 # ===========================================================================
+# Stage 2b: governance deploy + ownership handover (FINAL L1 stage, after bridge wiring)
+# ===========================================================================
+stage_governance_handover() {
+  cd "$L1_DIR"
+  step "Governance: deploying authority/timelock/validator and handing over L1 ownership (Sepolia)..."
+  # GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR: exported by the preflight
+  # (only when set); forge's vm.envOr treats an empty-but-set env var as
+  # unset, so nothing further is needed here to signal fresh-deploy vs
+  # resume mode. (A ${VAR:+NAME="$VAR"} prefix on the command line is NOT
+  # safe here: once expanded it becomes the literal word `NAME=value`,
+  # which bash parses as the COMMAND NAME, not an env assignment -> "command
+  # not found" (exit 127) whenever the var is set.)
+  # The verify-tolerance check below must only ever see a file written by
+  # THIS run: a failure before forge rewrites the file would otherwise leave
+  # a stale governance-testnet.json from a previous run, whose .authority
+  # still has code on-chain -> a false "the broadcast landed" warning.
+  rm -f deployments/governance-testnet.json
+  if ! ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+    GOV_PROPOSER="$GOV_PROPOSER" GOV_PROPOSER_2="$GOV_PROPOSER_2" GOV_GUARDIAN="$GOV_GUARDIAN" \
+    GOV_TRANSITION_SECONDS="$GOV_TRANSITION_SECONDS" GOV_TIMELOCK_DELAY="$GOV_TIMELOCK_DELAY" \
+    make deploy-governance-testnet; then
+    # deployments/governance-testnet.json is written at simulation time, so
+    # its mere existence is NOT proof the broadcast landed. Check on-chain
+    # code at the recorded authority address instead: a non-zero forge exit
+    # after a successful broadcast is most likely --verify (Etherscan) failing.
+    AUTH=$(jq -r '.authority // ""' deployments/governance-testnet.json 2>/dev/null || true)
+    CODE=$(cast code "$AUTH" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -n "$AUTH" ] && [ "$CODE" != "0x" ]; then
+      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployGovernance.s.sol:DeployGovernance --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    else
+      fail "make deploy-governance-testnet failed before the broadcast landed (no code at the authority address). Check the forge output above; to resume a partial handover set GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR."
+    fi
+  fi
+  [ -f deployments/governance-testnet.json ] || fail "v1-l1/deployments/governance-testnet.json was not created by 'make deploy-governance-testnet'. Check the forge output above."
+  ok "GovernanceAuthority: $(jq -r '.authority' deployments/governance-testnet.json)"
+  ok "ZeracleTimelock:     $(jq -r '.timelock' deployments/governance-testnet.json)"
+  ok "UpgradeValidator:    $(jq -r '.validator' deployments/governance-testnet.json)"
+  cd "$ROOT_DIR"
+}
+
+# ===========================================================================
 # Stage 3: manifest + web env sync
 #
 # Composes deployments/testnet/deployment-manifest.json (same shape as
@@ -353,9 +470,10 @@ stage_manifest_sync() {
   L1_LOCAL="$L1_DIR/deployments/local-testnet.json"
   L1_TOKENS="$L1_DIR/deployments/tokens-testnet.json"
   L1_BRIDGE="$L1_DIR/deployments/bridge-testnet.json"
+  L1_GOV="$L1_DIR/deployments/governance-testnet.json"
   L2_DEPLOY="$L2_DIR/deployment.json"
 
-  for f in "$L1_LOCAL" "$L1_TOKENS" "$L1_BRIDGE" "$L2_DEPLOY"; do
+  for f in "$L1_LOCAL" "$L1_TOKENS" "$L1_BRIDGE" "$L1_GOV" "$L2_DEPLOY"; do
     [ -f "$f" ] || fail "$f is missing — stage_l1_deploy and stage_l2_deploy must both complete successfully before the manifest stage can run."
   done
 
@@ -387,6 +505,18 @@ stage_manifest_sync() {
       "chainlinkOracle": "$(jq -r '.chainlinkOracle' "$L1_LOCAL")",
       "uniswapTwap": "$(jq -r '.uniswapTwap' "$L1_LOCAL")",
       "mockDexAggregator": "$(jq -r '.mockDexAggregator' "$L1_LOCAL")"
+    },
+    "governance": {
+      "authority": "$(jq -r '.authority' "$L1_GOV")",
+      "timelock": "$(jq -r '.timelock' "$L1_GOV")",
+      "validator": "$(jq -r '.validator' "$L1_GOV")",
+      "admin": "$(jq -r '.admin' "$L1_GOV")",
+      "guardian": "$(jq -r '.guardian' "$L1_GOV")",
+      "proposer": "$(jq -r '.proposer' "$L1_GOV")",
+      "proposer2": "$(jq -r '.proposer2 // ""' "$L1_GOV")",
+      "transitionAt": $(jq -r '.transitionAt' "$L1_GOV"),
+      "timelockDelay": $(jq -r '.timelockDelay' "$L1_GOV"),
+      "executionWindow": $(jq -r '.executionWindow' "$L1_GOV")
     },
     "tokens": {
       "LUSD": { "address": "$(jq -r '.LUSD' "$L1_TOKENS")", "decimals": 18 },
@@ -484,6 +614,9 @@ stage_l1_deploy
 
 step "Stage 2: L2 deploy (Aztec testnet)"
 stage_l2_deploy
+
+step "Stage 2b: governance handover (Sepolia)"
+stage_governance_handover
 
 step "Stage 3: manifest + web env sync"
 stage_manifest_sync
