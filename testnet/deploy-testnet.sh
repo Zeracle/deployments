@@ -409,6 +409,9 @@ stage_l2_deploy() {
     L1_RPC_URL="$TESTNET_L1_RPC_URL" \
     L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
     L1_FEE_JUICE_PORTAL_ADDRESS="$L1_FEE_JUICE_PORTAL_ADDRESS" \
+    L1_TOKEN_PORTAL="$TOKEN_PORTAL" \
+    L1_TREASURY="$TREASURY" \
+    L1_INSURANCE_FUND="$INSURANCE_FUND" \
     DEPLOY_TX_TIMEOUT_SECS=600 \
     ETH_CHAIN_ID=11155111 \
     yarn deploy:clean
@@ -433,6 +436,17 @@ stage_l2_deploy() {
   L2_BRIDGE_ADDRESS_LC=$(echo "${L2_BRIDGE_ADDRESS#0x}" | tr '[:upper:]' '[:lower:]')
   [[ "$WIRED_L2_BRIDGE_LC" == *"$L2_BRIDGE_ADDRESS_LC"* ]] || fail "wire-bridge-testnet ran but TokenPortal.l2Bridge() ($WIRED_L2_BRIDGE) does not match the deployed TokenBridge ($L2_BRIDGE_ADDRESS). Check v1-l1/scripts/wire-bridge.sh output above."
   ok "TokenPortal wired to TokenBridge $L2_BRIDGE_ADDRESS"
+
+  # Same postcondition for the fee-flush leg: wire-bridge.sh sets BOTH l2Bridge
+  # and l2FeeDistribution, and TokenPortal.claimFees only accepts messages whose
+  # sender is l2FeeDistribution — so an unwired FeeDistribution makes every
+  # flushed fee message unconsumable. Assert it rather than trusting the script.
+  L2_FEE_DISTRIBUTION_ADDRESS=$(jq -r '.contracts.feeDistribution' deployment.json)
+  WIRED_L2_FD=$(cast call "$(jq -r '.tokenPortal' "$L1_DIR/deployments/bridge-testnet.json")" "l2FeeDistribution()(bytes32)" --rpc-url "$TESTNET_L1_RPC_URL")
+  WIRED_L2_FD_LC=$(echo "$WIRED_L2_FD" | tr '[:upper:]' '[:lower:]')
+  L2_FEE_DISTRIBUTION_ADDRESS_LC=$(echo "${L2_FEE_DISTRIBUTION_ADDRESS#0x}" | tr '[:upper:]' '[:lower:]')
+  [[ "$WIRED_L2_FD_LC" == *"$L2_FEE_DISTRIBUTION_ADDRESS_LC"* ]] || fail "wire-bridge-testnet ran but TokenPortal.l2FeeDistribution() ($WIRED_L2_FD) does not match the deployed FeeDistribution ($L2_FEE_DISTRIBUTION_ADDRESS). Fee flushes would produce messages claimFees can never consume. Check v1-l1/scripts/wire-bridge.sh output above."
+  ok "TokenPortal wired to FeeDistribution $L2_FEE_DISTRIBUTION_ADDRESS"
 
   cd "$ROOT_DIR"
 }
