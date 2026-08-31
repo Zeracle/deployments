@@ -220,7 +220,26 @@ done
 # governance decision, not a deploy-script default. Set BASKET_ROUTER explicitly
 # if you have decided on one.
 : "${BASKET_ROUTER:=}"
-export BASKET_VOTING_WINDOW BASKET_EXECUTION_DELAY BASKET_VOTING_WINDOW_FLOOR BASKET_EXECUTION_DELAY_FLOOR BASKET_ROUTER
+
+# Resumable basket stage, same shape as the D5 governance resume block above.
+# BASKET_MANAGER is optional, but when it IS set this run reuses that manager
+# instead of deploying a fresh one — and that decision has to be ANNOUNCED here,
+# before anything broadcasts. Without this block an operator who exported
+# BASKET_MANAGER days ago for a one-off `cast` check and then resumed a partial
+# run would silently resume onto it: DeployBasketManager's immutable checks
+# (pool/authority/safe/rollup/version) can all pass for a manager that is
+# nonetheless not the one this deploy meant to use, and nothing in preflight
+# would show the choice was made.
+BASKET_RESUME_MODE=false
+if [ -n "${BASKET_MANAGER:-}" ]; then
+  [[ "$BASKET_MANAGER" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "BASKET_MANAGER ($BASKET_MANAGER) is not a 0x-prefixed 20-byte hex address. Unset it to deploy a fresh BasketManager."
+  if ! BASKET_MANAGER_CODE=$(cast code "$BASKET_MANAGER" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+    fail "Could not fetch code for BASKET_MANAGER ($BASKET_MANAGER) from $TESTNET_L1_RPC_URL: $BASKET_MANAGER_CODE"
+  fi
+  [ "$BASKET_MANAGER_CODE" != "0x" ] || fail "BASKET_MANAGER ($BASKET_MANAGER) has no code on Sepolia — resume mode requires a previously deployed BasketManager. Unset BASKET_MANAGER to deploy a fresh one."
+  BASKET_RESUME_MODE=true
+fi
+export BASKET_VOTING_WINDOW BASKET_EXECUTION_DELAY BASKET_VOTING_WINDOW_FLOOR BASKET_EXECUTION_DELAY_FLOOR BASKET_ROUTER BASKET_MANAGER
 ok "Voting window:   ${BASKET_VOTING_WINDOW}s (immutable floor ${BASKET_VOTING_WINDOW_FLOOR}s)"
 ok "Execution delay: ${BASKET_EXECUTION_DELAY}s (immutable floor ${BASKET_EXECUTION_DELAY_FLOOR}s)"
 if [ -z "$BASKET_ROUTER" ]; then
@@ -228,6 +247,9 @@ if [ -z "$BASKET_ROUTER" ]; then
 else
   [[ "$BASKET_ROUTER" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "BASKET_ROUTER ($BASKET_ROUTER) is not a 0x-prefixed 20-byte hex address."
   ok "Swap router:     $BASKET_ROUTER (will be allow-listed)"
+fi
+if [ "$BASKET_RESUME_MODE" = true ]; then
+  ok "RESUME mode: reusing BasketManager $BASKET_MANAGER (NO fresh BasketManager will be deployed)"
 fi
 
 step "Preflight: checking Aztec node ($AZTEC_NODE_URL)..."
@@ -323,6 +345,7 @@ cat <<SUMMARY
   GOV_PROPOSER_2:               $GOV_PROPOSER_2
   GOV_TRANSITION_SECONDS:       $GOV_TRANSITION_SECONDS
   Resume mode:                  $([ "$RESUME_MODE" = true ] && echo "yes (reusing GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR)" || echo "no (fresh governance deploy)")
+  Basket resume mode:           $([ "$BASKET_RESUME_MODE" = true ] && echo "yes (reusing BASKET_MANAGER $BASKET_MANAGER)" || echo "no (fresh BasketManager deploy)")
   Aztec node version:           $NODE_VERSION
   Local SDK version:            $LOCAL_SDK_VERSION
   L1 Inbox address:             $L1_INBOX_ADDRESS
@@ -554,9 +577,9 @@ stage_governance_handover() {
 stage_basket_manager() {
   cd "$L1_DIR"
   step "Basket: deploying BasketManager and wiring it into the LiquidityPool (Sepolia)..."
-  # BASKET_MANAGER is the deploy script's RESUME variable — honoured from the
-  # environment if the operator sets it, so an interrupted run can be finished
-  # against the SAME manager rather than deploying a second one.
+  # BASKET_MANAGER is the deploy script's RESUME variable, exported by the
+  # preflight, which has already proved it has code on-chain and ANNOUNCED that
+  # this run resumes onto it instead of deploying fresh.
   # The verify-tolerance check below must only ever see a file written by THIS
   # run: a failure before forge rewrites it would otherwise leave a stale
   # basket-testnet.json whose .basketManager still has code on-chain -> a false
@@ -575,6 +598,7 @@ stage_basket_manager() {
     BM_CODE=$(cast code "$BM" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
     if [ -n "$BM" ] && [ "$BM_CODE" != "0x" ]; then
       warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+      warn "NOTE on --libraries: BasketManager needs NONE (it only reads compile-time constants from BasketCompositionLib), so a library flag will not fix a failure here. The LiquidityPool IMPLEMENTATION is the contract that does need --libraries, and the usual cause of ITS verification failing is a STALE basketCompositionLib: the link is per-implementation, so a UUPS upgrade redeploys the implementation and may relink it against a newly deployed library, leaving the recorded value describing a library the live pool no longer uses. Nothing asserts that value is current — re-read the link target Upgrade.s.sol logs after every upgrade and refresh local-testnet.json + the manifest before verifying."
     else
       fail "make deploy-basket-manager-testnet failed before the broadcast landed (no code at the manager address). Check the forge output above; to resume a partial wiring set BASKET_MANAGER to the manager this run deployed."
     fi
@@ -600,7 +624,10 @@ stage_basket_manager() {
   # and the recorded value must be refreshed from the upgrade's output.
   BASKET_LIB=$(jq -r '.basketCompositionLib // ""' deployments/local-testnet.json)
   if [ -n "$BASKET_LIB" ] && [ "$BASKET_LIB" != "null" ]; then
-    ok "BasketCompositionLib: $BASKET_LIB (pass to --libraries when verifying the pool implementation)"
+    ok "BasketCompositionLib: $BASKET_LIB (pass to --libraries when verifying the pool implementation; NOT needed for BasketManager)"
+    ok "  ^ recorded by THIS deploy. Nothing re-checks it later: a UUPS upgrade redeploys the"
+    ok "    pool implementation and may relink it against a new library, so refresh this value"
+    ok "    from Upgrade.s.sol's log before verifying an upgraded implementation."
   else
     warn "basketCompositionLib is missing from local-testnet.json — LiquidityPool implementation verification will fail without --libraries. Re-run the L1 stage with an up-to-date DeployLocal."
   fi
