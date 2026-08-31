@@ -192,6 +192,44 @@ ok "GOV_PROPOSER_2: $GOV_PROPOSER_2"
 ok "GOV_GUARDIAN:   $GOV_GUARDIAN"
 ok "Transition:     ${GOV_TRANSITION_SECONDS}s after deploy; timelock delay ${GOV_TIMELOCK_DELAY}s"
 
+step "Preflight: basket lifecycle parameters (Phase 1)..."
+# BasketManager durations. Testnet+ runs the real thing: 5 d voting window /
+# 48 h execution delay, with IMMUTABLE floors of 3 d / 24 h — no later setParams
+# call can go below them, so getting these wrong here is unfixable without a
+# redeploy. (The sandbox runs 30 min / 1 h, the contract's hard minima.)
+: "${BASKET_VOTING_WINDOW:=432000}"        # 5 d
+: "${BASKET_EXECUTION_DELAY:=172800}"      # 48 h
+: "${BASKET_VOTING_WINDOW_FLOOR:=259200}"  # 3 d
+: "${BASKET_EXECUTION_DELAY_FLOOR:=86400}" # 24 h
+for BASKET_VAR in BASKET_VOTING_WINDOW BASKET_EXECUTION_DELAY BASKET_VOTING_WINDOW_FLOOR BASKET_EXECUTION_DELAY_FLOOR; do
+  BASKET_VAL=${!BASKET_VAR}
+  [[ "$BASKET_VAL" =~ ^[0-9]+$ ]] || fail "$BASKET_VAR ($BASKET_VAL) must be a whole number of seconds."
+done
+# Spec §8 minima for testnet+, asserted here rather than only inside the deploy
+# script so --preflight-only catches a bad .env before anything is broadcast.
+[ "$BASKET_VOTING_WINDOW_FLOOR" -ge 259200 ] || fail "BASKET_VOTING_WINDOW_FLOOR ($BASKET_VOTING_WINDOW_FLOOR) is below the 3 d (259200 s) testnet floor. It is IMMUTABLE — a redeploy is the only way to change it."
+[ "$BASKET_EXECUTION_DELAY_FLOOR" -ge 86400 ] || fail "BASKET_EXECUTION_DELAY_FLOOR ($BASKET_EXECUTION_DELAY_FLOOR) is below the 24 h (86400 s) testnet floor. It is IMMUTABLE — a redeploy is the only way to change it."
+[ "$BASKET_VOTING_WINDOW" -ge "$BASKET_VOTING_WINDOW_FLOOR" ] || fail "BASKET_VOTING_WINDOW ($BASKET_VOTING_WINDOW) is below its own floor ($BASKET_VOTING_WINDOW_FLOOR) — the constructor would revert."
+[ "$BASKET_EXECUTION_DELAY" -ge "$BASKET_EXECUTION_DELAY_FLOOR" ] || fail "BASKET_EXECUTION_DELAY ($BASKET_EXECUTION_DELAY) is below its own floor ($BASKET_EXECUTION_DELAY_FLOOR) — the constructor would revert."
+# MAX_VOTING_WINDOW / MAX_EXECUTION_DELAY are both 30 d in BasketManager.
+[ "$BASKET_VOTING_WINDOW" -le 2592000 ] || fail "BASKET_VOTING_WINDOW ($BASKET_VOTING_WINDOW) exceeds BasketManager.MAX_VOTING_WINDOW (30 d / 2592000 s)."
+[ "$BASKET_EXECUTION_DELAY" -le 2592000 ] || fail "BASKET_EXECUTION_DELAY ($BASKET_EXECUTION_DELAY) exceeds BasketManager.MAX_EXECUTION_DELAY (30 d / 2592000 s)."
+# NO swap router is allow-listed on testnet. On the sandbox the pipeline
+# allow-lists a MockDexAggregator because a local chain has no other swap venue;
+# on a real network, picking the venue a migration tranche routes through is a
+# governance decision, not a deploy-script default. Set BASKET_ROUTER explicitly
+# if you have decided on one.
+: "${BASKET_ROUTER:=}"
+export BASKET_VOTING_WINDOW BASKET_EXECUTION_DELAY BASKET_VOTING_WINDOW_FLOOR BASKET_EXECUTION_DELAY_FLOOR BASKET_ROUTER
+ok "Voting window:   ${BASKET_VOTING_WINDOW}s (immutable floor ${BASKET_VOTING_WINDOW_FLOOR}s)"
+ok "Execution delay: ${BASKET_EXECUTION_DELAY}s (immutable floor ${BASKET_EXECUTION_DELAY_FLOOR}s)"
+if [ -z "$BASKET_ROUTER" ]; then
+  ok "Swap router:     none (allow-list one through governance when the venue is chosen)"
+else
+  [[ "$BASKET_ROUTER" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "BASKET_ROUTER ($BASKET_ROUTER) is not a 0x-prefixed 20-byte hex address."
+  ok "Swap router:     $BASKET_ROUTER (will be allow-listed)"
+fi
+
 step "Preflight: checking Aztec node ($AZTEC_NODE_URL)..."
 # getNodeInfo one-liner pattern (see v1-l1/Makefile's deploy-bridge target,
 # ~line 252: createAztecNodeClient from '@aztec/aztec.js/node'). Run from
@@ -493,6 +531,83 @@ stage_governance_handover() {
 }
 
 # ===========================================================================
+# Stage 2c: BasketManager deploy + pool wiring (after the governance handover)
+#
+# ORDERING. `LiquidityPool.setBasketManager` is owner-gated and ONE-SHOT, so it
+# gets exactly one chance to land — but it cannot run before Stage 2b:
+# BasketManager's constructor takes the GovernanceAuthority address, and
+# DeployGovernance deploys the authority AND hands ownership over in a single
+# broadcast, leaving no seam between them. This stage therefore runs immediately
+# AFTER the handover and routes the call through
+# `authority.execute(pool, setBasketManager(...))`, which the deployer may do
+# for as long as it is the authority's currentAuthority() — the whole
+# GOV_TRANSITION_SECONDS admin phase (180 d by default). DeployBasketManager
+# asserts `pool.basketManager() != 0` afterwards, so a deploy can never silently
+# leave the one-shot unfired.
+#
+# `setBasketVote` stays UNSET — the L2 BasketVote contract is Phase 2 and
+# nothing here may fail on its absence. No BasketManager selector is added to
+# the guardian's emergency allow-list, deliberately: the guardian lane is
+# stop-only, and `setParams` would hand one guardian key control of quorum,
+# majority and the execution delay. DeployBasketManager asserts that too.
+# ===========================================================================
+stage_basket_manager() {
+  cd "$L1_DIR"
+  step "Basket: deploying BasketManager and wiring it into the LiquidityPool (Sepolia)..."
+  # BASKET_MANAGER is the deploy script's RESUME variable — honoured from the
+  # environment if the operator sets it, so an interrupted run can be finished
+  # against the SAME manager rather than deploying a second one.
+  # The verify-tolerance check below must only ever see a file written by THIS
+  # run: a failure before forge rewrites it would otherwise leave a stale
+  # basket-testnet.json whose .basketManager still has code on-chain -> a false
+  # "the broadcast landed" warning.
+  rm -f deployments/basket-testnet.json
+  if ! ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+    BASKET_VOTING_WINDOW="$BASKET_VOTING_WINDOW" BASKET_EXECUTION_DELAY="$BASKET_EXECUTION_DELAY" \
+    BASKET_VOTING_WINDOW_FLOOR="$BASKET_VOTING_WINDOW_FLOOR" \
+    BASKET_EXECUTION_DELAY_FLOOR="$BASKET_EXECUTION_DELAY_FLOOR" \
+    make deploy-basket-manager-testnet; then
+    # deployments/basket-testnet.json is written at simulation time, so its mere
+    # existence is NOT proof the broadcast landed. Check on-chain code at the
+    # recorded manager address instead: a non-zero forge exit after a successful
+    # broadcast is most likely --verify (Etherscan) failing.
+    BM=$(jq -r '.basketManager // ""' deployments/basket-testnet.json 2>/dev/null || true)
+    BM_CODE=$(cast code "$BM" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -n "$BM" ] && [ "$BM_CODE" != "0x" ]; then
+      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    else
+      fail "make deploy-basket-manager-testnet failed before the broadcast landed (no code at the manager address). Check the forge output above; to resume a partial wiring set BASKET_MANAGER to the manager this run deployed."
+    fi
+  fi
+  [ -f deployments/basket-testnet.json ] || fail "v1-l1/deployments/basket-testnet.json was not created by 'make deploy-basket-manager-testnet'. Check the forge output above."
+  BASKET_MANAGER=$(jq -r '.basketManager' deployments/basket-testnet.json)
+  [ -n "$BASKET_MANAGER" ] && [ "$BASKET_MANAGER" != "null" ] || fail "basketManager not found in deployments/basket-testnet.json"
+
+  # Post-handover postcondition, re-checked from the shell so the stage fails
+  # even if the script's own assertions were somehow skipped. The one-shot has
+  # no second chance, so this is the last place it can be caught cheaply.
+  POOL_BM=$(cast call "$(jq -r '.liquidityPoolProxy' deployments/local-testnet.json)" "basketManager()(address)" --rpc-url "$TESTNET_L1_RPC_URL")
+  POOL_BM_LC=$(echo "$POOL_BM" | tr '[:upper:]' '[:lower:]')
+  BASKET_MANAGER_LC=$(echo "$BASKET_MANAGER" | tr '[:upper:]' '[:lower:]')
+  [ "$POOL_BM_LC" = "$BASKET_MANAGER_LC" ] || fail "LiquidityPool.basketManager() ($POOL_BM) does not match the deployed BasketManager ($BASKET_MANAGER) — the one-shot setBasketManager did not land, and it cannot be retried against a different manager."
+  ok "BasketManager: $BASKET_MANAGER (window ${BASKET_VOTING_WINDOW}s / delay ${BASKET_EXECUTION_DELAY}s)"
+
+  # Verification of the LiquidityPool IMPLEMENTATION (not this manager) needs the
+  # linked library address, which forge deploys during the L1 stage:
+  #   --libraries contracts/libraries/BasketCompositionLib.sol:BasketCompositionLib:<addr>
+  # It is recorded as basketCompositionLib in local-testnet.json and carried into
+  # the manifest. The link is per-implementation, so a UUPS upgrade may relink
+  # and the recorded value must be refreshed from the upgrade's output.
+  BASKET_LIB=$(jq -r '.basketCompositionLib // ""' deployments/local-testnet.json)
+  if [ -n "$BASKET_LIB" ] && [ "$BASKET_LIB" != "null" ]; then
+    ok "BasketCompositionLib: $BASKET_LIB (pass to --libraries when verifying the pool implementation)"
+  else
+    warn "basketCompositionLib is missing from local-testnet.json — LiquidityPool implementation verification will fail without --libraries. Re-run the L1 stage with an up-to-date DeployLocal."
+  fi
+  cd "$ROOT_DIR"
+}
+
+# ===========================================================================
 # Stage 3: manifest + web env sync
 #
 # Composes deployments/testnet/deployment-manifest.json (same shape as
@@ -511,10 +626,11 @@ stage_manifest_sync() {
   L1_TOKENS="$L1_DIR/deployments/tokens-testnet.json"
   L1_BRIDGE="$L1_DIR/deployments/bridge-testnet.json"
   L1_GOV="$L1_DIR/deployments/governance-testnet.json"
+  L1_BASKET="$L1_DIR/deployments/basket-testnet.json"
   L2_DEPLOY="$L2_DIR/deployment.json"
 
-  for f in "$L1_LOCAL" "$L1_TOKENS" "$L1_BRIDGE" "$L1_GOV" "$L2_DEPLOY"; do
-    [ -f "$f" ] || fail "$f is missing — stage_l1_deploy and stage_l2_deploy must both complete successfully before the manifest stage can run."
+  for f in "$L1_LOCAL" "$L1_TOKENS" "$L1_BRIDGE" "$L1_GOV" "$L1_BASKET" "$L2_DEPLOY"; do
+    [ -f "$f" ] || fail "$f is missing — stage_l1_deploy, stage_l2_deploy, stage_governance_handover and stage_basket_manager must all complete successfully before the manifest stage can run."
   done
 
   MANIFEST_PATH="$SCRIPT_DIR/deployment-manifest.json"
@@ -544,7 +660,20 @@ stage_manifest_sync() {
       "mockAztecBridge": "$(jq -r '.mockAztecBridge' "$L1_LOCAL")",
       "chainlinkOracle": "$(jq -r '.chainlinkOracle' "$L1_LOCAL")",
       "uniswapTwap": "$(jq -r '.uniswapTwap' "$L1_LOCAL")",
-      "mockDexAggregator": "$(jq -r '.mockDexAggregator' "$L1_LOCAL")"
+      "mockDexAggregator": "$(jq -r '.mockDexAggregator' "$L1_LOCAL")",
+      "basketManager": "$(jq -r '.basketManager' "$L1_BASKET")",
+      "basketCompositionLib": "$(jq -r '.basketCompositionLib' "$L1_LOCAL")"
+    },
+    "basket": {
+      "manager": "$(jq -r '.basketManager' "$L1_BASKET")",
+      "allowedRouter": "$(jq -r '.allowedRouter' "$L1_BASKET")",
+      "votingWindow": $(jq -r '.votingWindow' "$L1_BASKET"),
+      "executionDelay": $(jq -r '.executionDelay' "$L1_BASKET"),
+      "votingWindowFloor": $(jq -r '.votingWindowFloor' "$L1_BASKET"),
+      "executionDelayFloor": $(jq -r '.executionDelayFloor' "$L1_BASKET"),
+      "quorumBps": $(jq -r '.quorumBps' "$L1_BASKET"),
+      "majorityBps": $(jq -r '.majorityBps' "$L1_BASKET"),
+      "priceSources": $(jq -c '.priceSources' "$L1_TOKENS")
     },
     "governance": {
       "authority": "$(jq -r '.authority' "$L1_GOV")",
@@ -586,6 +715,7 @@ stage_manifest_sync() {
     "VITE_BRIDGE_GUARD_ADDRESS": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
     "VITE_TREASURY_ADDRESS": "$(jq -r '.treasury' "$L1_LOCAL")",
     "VITE_INSURANCE_FUND_ADDRESS": "$(jq -r '.insuranceFund' "$L1_LOCAL")",
+    "VITE_BASKET_MANAGER_ADDRESS": "$(jq -r '.basketManager' "$L1_BASKET")",
     "VITE_TOKEN_PORTAL_ADDRESS": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
     "VITE_ZRCL_CONTRACT_ADDRESS": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
     "VITE_BRIDGE_CONTRACT_ADDRESS": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
@@ -630,6 +760,7 @@ MANIFEST
     BridgeGuard:        $(jq -r '.bridgeGuard' "$L1_LOCAL")
     Treasury:           $(jq -r '.treasury' "$L1_LOCAL")
     InsuranceFund:      $(jq -r '.insuranceFund' "$L1_LOCAL")
+    BasketManager:      $(jq -r '.basketManager' "$L1_BASKET")
     TokenPortal:        $(jq -r '.tokenPortal' "$L1_BRIDGE") (wired to L2 TokenBridge below)
     LUSD / USDT / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
 
@@ -657,6 +788,9 @@ stage_l2_deploy
 
 step "Stage 2b: governance handover (Sepolia)"
 stage_governance_handover
+
+step "Stage 2c: BasketManager deploy + pool wiring (Sepolia)"
+stage_basket_manager
 
 step "Stage 3: manifest + web env sync"
 stage_manifest_sync

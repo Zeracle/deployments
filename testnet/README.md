@@ -89,6 +89,44 @@ safety net before real funds move). After confirmation it runs, in order:
    `make -C v1-l1 wire-bridge-testnet` and asserts `TokenPortal.l2Bridge()`
    matches before continuing — bridge deposits are wired end-to-end by the
    time this stage returns.
+
+   Two L1 stages run between this and the manifest, both of which the numbered
+   list above predates:
+
+   - **Stage 2b — governance handover:** `make deploy-governance-testnet`
+     deploys the GovernanceAuthority / ZeracleTimelock / UpgradeValidator and
+     moves every admin-bearing L1 contract to the authority. Output:
+     `v1-l1/deployments/governance-testnet.json`.
+   - **Stage 2c — BasketManager:** `make deploy-basket-manager-testnet` deploys
+     the `BasketManager` (the pool's only composition writer) and wires it in.
+     It must run AFTER 2b, because the manager's constructor takes the
+     GovernanceAuthority address and 2b deploys the authority and hands over in
+     a single broadcast — so `pool.setBasketManager`, which is owner-gated and
+     **one-shot**, is routed through `authority.execute(...)` while the deployer
+     is still the authority's `currentAuthority()` (the whole
+     `GOV_TRANSITION_SECONDS` admin phase). The stage asserts
+     `LiquidityPool.basketManager()` matches before continuing; there is no
+     second chance at that call. Output:
+     `v1-l1/deployments/basket-testnet.json`.
+
+     The voting window / execution delay and their **immutable** floors come
+     from `BASKET_VOTING_WINDOW`, `BASKET_EXECUTION_DELAY`,
+     `BASKET_VOTING_WINDOW_FLOOR` and `BASKET_EXECUTION_DELAY_FLOOR`
+     (defaults: 5 d / 48 h, floors 3 d / 24 h) and are preflight-checked.
+     No swap router is allow-listed by default — on the sandbox the pipeline
+     allow-lists a mock aggregator because a local chain has no other venue,
+     but on a real network choosing the venue a migration tranche routes
+     through is a governance decision. Set `BASKET_ROUTER` only once that
+     decision is made. `setBasketVote` stays unset: the L2 `BasketVote`
+     contract is Phase 2.
+
+     Verifying the **LiquidityPool implementation** on Etherscan additionally
+     needs the linked library:
+     `--libraries contracts/libraries/BasketCompositionLib.sol:BasketCompositionLib:<addr>`,
+     recorded as `basketCompositionLib` in `local-testnet.json` and in the
+     manifest. The link is per-implementation, so a UUPS upgrade may relink it
+     and the recorded value must be refreshed from the upgrade's output.
+
 3. **Manifest + web env sync:** writes
    `deployments/testnet/deployment-manifest.json` (same shape as the
    sandbox's generated manifest, minus `rpc.accountServer` — there is no
