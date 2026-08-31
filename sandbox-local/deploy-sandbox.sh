@@ -424,6 +424,15 @@ cd "$L1_DIR"
 unset BASKET_MANAGER
 # The existence check below must only ever see a file written by THIS run.
 rm -f deployments/basket.json
+
+# Never fire the one-shot `setBasketManager` onto an EMPTY basket. If
+# `deploy-mocks` (folded into `full-deploy-local` above) ever "succeeded"
+# without its `setComposition` call actually landing, locking an empty pool
+# behind the manager means repopulating it needs a full open -> queue ->
+# execute cycle before a single asset can be added back.
+BASKET_ASSETS=$(cast call "$POOL" "getSupportedAssets()(address[])" --rpc-url "$ETH_RPC_URL")
+[ "$BASKET_ASSETS" != "[]" ] || fail "LiquidityPool ($POOL) has an EMPTY basket (getSupportedAssets() returned []) — refusing to wire/fire the one-shot setBasketManager onto it. Confirm 'make deploy-mocks' actually ran setComposition before retrying."
+
 BASKET_ROUTER="$BASKET_ROUTER" make deploy-basket-manager
 [ -f deployments/basket.json ] || fail "deployments/basket.json not created"
 BASKET_MANAGER=$(jq -r '.basketManager' deployments/basket.json)

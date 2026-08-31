@@ -246,6 +246,10 @@ if [ -z "$BASKET_ROUTER" ]; then
   ok "Swap router:     none (allow-list one through governance when the venue is chosen)"
 else
   [[ "$BASKET_ROUTER" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "BASKET_ROUTER ($BASKET_ROUTER) is not a 0x-prefixed 20-byte hex address."
+  if ! BASKET_ROUTER_CODE=$(cast code "$BASKET_ROUTER" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+    fail "Could not fetch code for BASKET_ROUTER ($BASKET_ROUTER) from $TESTNET_L1_RPC_URL: $BASKET_ROUTER_CODE"
+  fi
+  [ "$BASKET_ROUTER_CODE" != "0x" ] || fail "BASKET_ROUTER ($BASKET_ROUTER) has no code on Sepolia — it must be a deployed swap router, not an EOA or a typo'd address."
   ok "Swap router:     $BASKET_ROUTER (will be allow-listed)"
 fi
 if [ "$BASKET_RESUME_MODE" = true ]; then
@@ -577,6 +581,15 @@ stage_governance_handover() {
 stage_basket_manager() {
   cd "$L1_DIR"
   step "Basket: deploying BasketManager and wiring it into the LiquidityPool (Sepolia)..."
+
+  # Never fire the one-shot `setBasketManager` onto an EMPTY basket. If
+  # `deploy-mocks-testnet` ever "succeeded" without its `setComposition` call
+  # actually landing, locking an empty pool behind the manager means repopulating
+  # it needs a full open -> queue -> execute cycle — 48 h on testnet
+  # (BASKET_EXECUTION_DELAY_FLOOR) — before a single asset can be added back.
+  BASKET_ASSETS=$(cast call "$LIQUIDITY_POOL_PROXY" "getSupportedAssets()(address[])" --rpc-url "$TESTNET_L1_RPC_URL")
+  [ "$BASKET_ASSETS" != "[]" ] || fail "LiquidityPool ($LIQUIDITY_POOL_PROXY) has an EMPTY basket (getSupportedAssets() returned []) — refusing to wire/fire the one-shot setBasketManager onto it. Confirm 'make deploy-mocks-testnet' actually ran setComposition before retrying."
+
   # BASKET_MANAGER is the deploy script's RESUME variable, exported by the
   # preflight, which has already proved it has code on-chain and ANNOUNCED that
   # this run resumes onto it instead of deploying fresh.
@@ -614,7 +627,32 @@ stage_basket_manager() {
   POOL_BM_LC=$(echo "$POOL_BM" | tr '[:upper:]' '[:lower:]')
   BASKET_MANAGER_LC=$(echo "$BASKET_MANAGER" | tr '[:upper:]' '[:lower:]')
   [ "$POOL_BM_LC" = "$BASKET_MANAGER_LC" ] || fail "LiquidityPool.basketManager() ($POOL_BM) does not match the deployed BasketManager ($BASKET_MANAGER) — the one-shot setBasketManager did not land, and it cannot be retried against a different manager."
-  ok "BasketManager: $BASKET_MANAGER (window ${BASKET_VOTING_WINDOW}s / delay ${BASKET_EXECUTION_DELAY}s)"
+
+  # Read the manager's ACTUAL on-chain params from the JSON `_save()` wrote (populated
+  # from `manager.votingWindow()` etc., not echoed env vars) — same shape as
+  # deploy-sandbox.sh's basket.json re-read. This matters in RESUME mode: with
+  # BASKET_MANAGER set, DeployBasketManager.s.sol's `_resolveManager` adopts the
+  # manager's ON-CHAIN floors (overwriting `w.votingWindowFloor`/`w.executionDelayFloor`)
+  # and `_wire` never calls `setParams`, so a resumed manager's real window/delay/floors
+  # can differ from whatever BASKET_VOTING_WINDOW/BASKET_EXECUTION_DELAY this shell holds
+  # — printing the env vars here would silently misreport what actually got wired.
+  ACTUAL_VOTING_WINDOW=$(jq -r '.votingWindow' deployments/basket-testnet.json)
+  ACTUAL_EXECUTION_DELAY=$(jq -r '.executionDelay' deployments/basket-testnet.json)
+  ACTUAL_VOTING_WINDOW_FLOOR=$(jq -r '.votingWindowFloor' deployments/basket-testnet.json)
+  ACTUAL_EXECUTION_DELAY_FLOOR=$(jq -r '.executionDelayFloor' deployments/basket-testnet.json)
+
+  # `_assertBasketManager` only re-checks the CONTRACT's hard minima (30 min / 1 h),
+  # not the stricter testnet floor (3 d / 24 h) this script's own preflight enforces for
+  # a FRESH deploy. A resume onto a manager wired for a different environment (e.g. the
+  # sandbox) would sail through that assertion and land here with real params below the
+  # testnet minimum — so check the ON-CHAIN values again, explicitly, against the
+  # testnet floor constants (not the shell's possibly-irrelevant BASKET_*_FLOOR env vars,
+  # which only bind a FRESH deploy's constructor args).
+  [ "$ACTUAL_VOTING_WINDOW_FLOOR" -ge 259200 ] || fail "BasketManager $BASKET_MANAGER has votingWindowFloor=${ACTUAL_VOTING_WINDOW_FLOOR}s on-chain — below the 3 d (259200 s) testnet minimum. This manager was wired for a different environment (e.g. the sandbox) and must not be reused here."
+  [ "$ACTUAL_EXECUTION_DELAY_FLOOR" -ge 86400 ] || fail "BasketManager $BASKET_MANAGER has executionDelayFloor=${ACTUAL_EXECUTION_DELAY_FLOOR}s on-chain — below the 24 h (86400 s) testnet minimum. This manager was wired for a different environment (e.g. the sandbox) and must not be reused here."
+  [ "$ACTUAL_VOTING_WINDOW" -ge 259200 ] || fail "BasketManager $BASKET_MANAGER has votingWindow=${ACTUAL_VOTING_WINDOW}s on-chain — below the 3 d (259200 s) testnet minimum."
+  [ "$ACTUAL_EXECUTION_DELAY" -ge 86400 ] || fail "BasketManager $BASKET_MANAGER has executionDelay=${ACTUAL_EXECUTION_DELAY}s on-chain — below the 24 h (86400 s) testnet minimum."
+  ok "BasketManager: $BASKET_MANAGER (window ${ACTUAL_VOTING_WINDOW}s / delay ${ACTUAL_EXECUTION_DELAY}s) [on-chain]"
 
   # Verification of the LiquidityPool IMPLEMENTATION (not this manager) needs the
   # linked library address, which forge deploys during the L1 stage:
