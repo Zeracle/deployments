@@ -123,6 +123,18 @@ fi
 : "${GOV_PROPOSER_2:=}"
 export GOV_TRANSITION_SECONDS GOV_TIMELOCK_DELAY GOV_PROPOSER GOV_GUARDIAN GOV_PROPOSER_2
 
+# Basket lifecycle (Phase 1): BasketManager is the pool's only composition writer.
+# Sandbox durations are the contract's hard minima — 30 min voting window, 1 h
+# execution delay — so a governance rehearsal fits inside one working session;
+# testnet+ passes 5 d / 48 h with 3 d / 24 h floors (see deploy-testnet.sh).
+# The floors are IMMUTABLE, so these values are baked in at construction and no
+# later setParams call can go below them.
+: "${BASKET_VOTING_WINDOW:=1800}"
+: "${BASKET_EXECUTION_DELAY:=3600}"
+: "${BASKET_VOTING_WINDOW_FLOOR:=1800}"
+: "${BASKET_EXECUTION_DELAY_FLOOR:=3600}"
+export BASKET_VOTING_WINDOW BASKET_EXECUTION_DELAY BASKET_VOTING_WINDOW_FLOOR BASKET_EXECUTION_DELAY_FLOOR
+
 wait_for_port() {
   local port=$1 name=$2 timeout=${3:-120}
   step "Waiting for $name on port $port..."
@@ -376,6 +388,67 @@ ok "ZeracleTimelock:     $GOV_TIMELOCK (delay $(jq -r '.timelockDelay' deploymen
 cd "$ROOT_DIR"
 
 # ===========================================================================
+# 6c. BasketManager deploy + pool wiring
+#
+# ORDERING. `LiquidityPool.setBasketManager` is owner-gated and ONE-SHOT, so it
+# gets exactly one chance to land — but it cannot run before 6b: BasketManager's
+# constructor takes the GovernanceAuthority address, and DeployGovernance
+# deploys the authority AND hands ownership over in a single broadcast, leaving
+# no seam between them. This stage therefore runs immediately AFTER the handover
+# and routes the call through `authority.execute(pool, setBasketManager(...))`,
+# which the deployer may do for as long as it is the authority's
+# currentAuthority() — i.e. the whole GOV_TRANSITION_SECONDS admin phase (365 d
+# on the sandbox). DeployBasketManager asserts `pool.basketManager() != 0`
+# afterwards, so a fresh deploy can never silently leave the one-shot unfired.
+#
+# The sandbox allow-lists its MockDexAggregator as the migration swap router —
+# the only swap venue a local chain has. `setBasketVote` stays UNSET: the L2
+# BasketVote contract is Phase 2 and nothing here may fail on its absence.
+#
+# NOT DONE, deliberately: no BasketManager selector is added to the guardian's
+# emergency allow-list. The guardian lane is stop-only (LiquidityPool.pause,
+# BridgeGuard.tripBreaker, fixed at GovernanceAuthority construction);
+# `setParams` would hand one guardian key control of quorum, majority and the
+# execution delay. DeployBasketManager asserts this rather than trusting a
+# comment.
+# ===========================================================================
+step "Deploying BasketManager and wiring it into the LiquidityPool..."
+cd "$L1_DIR"
+# Sandbox swap router for migration tranches. `=` not `:=` on purpose: an
+# explicitly empty BASKET_ROUTER means "allow-list nothing" and must survive,
+# where `:=` would treat it as unset and put the mock back.
+: "${BASKET_ROUTER=$(jq -r '.mockDexAggregator' deployments/local.json)}"
+# Unset BASKET_MANAGER before this call: the name is the deploy script's RESUME
+# variable, and a stale export left in this shell by an earlier partial run must
+# not make a fresh chain adopt a manager that no longer exists.
+unset BASKET_MANAGER
+# The existence check below must only ever see a file written by THIS run.
+rm -f deployments/basket.json
+
+# Never fire the one-shot `setBasketManager` onto an EMPTY basket. If
+# `deploy-mocks` (folded into `full-deploy-local` above) ever "succeeded"
+# without its `setComposition` call actually landing, locking an empty pool
+# behind the manager means repopulating it needs a full open -> queue ->
+# execute cycle before a single asset can be added back.
+BASKET_ASSETS=$(cast call "$POOL" "getSupportedAssets()(address[])" --rpc-url "$ETH_RPC_URL")
+[ "$BASKET_ASSETS" != "[]" ] || fail "LiquidityPool ($POOL) has an EMPTY basket (getSupportedAssets() returned []) — refusing to wire/fire the one-shot setBasketManager onto it. Confirm 'make deploy-mocks' actually ran setComposition before retrying."
+
+BASKET_ROUTER="$BASKET_ROUTER" make deploy-basket-manager
+[ -f deployments/basket.json ] || fail "deployments/basket.json not created"
+BASKET_MANAGER=$(jq -r '.basketManager' deployments/basket.json)
+[ -n "$BASKET_MANAGER" ] && [ "$BASKET_MANAGER" != "null" ] || fail "basketManager not found in deployments/basket.json"
+# Post-handover postcondition, re-checked here from the shell so the stage fails
+# even if the script's own assertions were somehow skipped.
+POOL_BM=$(cast call "$(jq -r '.liquidityPoolProxy' deployments/local.json)" "basketManager()(address)" --rpc-url "$ETH_RPC_URL")
+[ "$(echo "$POOL_BM" | tr '[:upper:]' '[:lower:]')" = "$(echo "$BASKET_MANAGER" | tr '[:upper:]' '[:lower:]')" ] || fail "LiquidityPool.basketManager() ($POOL_BM) does not match the deployed BasketManager ($BASKET_MANAGER) — the one-shot setBasketManager did not land."
+ok "BasketManager:       $BASKET_MANAGER (window $(jq -r '.votingWindow' deployments/basket.json)s / delay $(jq -r '.executionDelay' deployments/basket.json)s)"
+# `allowedRouter` is the router THIS run allow-listed, not the whole allowlist:
+# BasketManager.allowedRouters is a mapping with no enumeration, so no deploy
+# artifact can claim to be a complete list.
+ok "Swap router allow-listed: $(jq -r '.allowedRouter' deployments/basket.json)"
+cd "$ROOT_DIR"
+
+# ===========================================================================
 # 7. Update Web App Environment
 # ===========================================================================
 
@@ -478,6 +551,7 @@ VITE_WITHDRAWAL_ADAPTER_ADDRESS=$WITHDRAWAL_ADAPTER
 VITE_BRIDGE_GUARD_ADDRESS=$BRIDGE_GUARD
 VITE_TREASURY_ADDRESS=$TREASURY
 VITE_INSURANCE_FUND_ADDRESS=$INSURANCE_FUND
+VITE_BASKET_MANAGER_ADDRESS=$BASKET_MANAGER
 VITE_TOKEN_PORTAL_ADDRESS=$TOKEN_PORTAL
 VITE_FEE_JUICE_PORTAL_ADDRESS=$FEE_JUICE_PORTAL
 VITE_FEE_JUICE_L1_ADDRESS=$FEE_JUICE_ASSET
@@ -554,6 +628,7 @@ step "Generating deployment manifest..."
 L1_LOCAL="$L1_DIR/deployments/local.json"
 L1_BRIDGE="$L1_DIR/deployments/bridge.json"
 L1_GOV="$L1_DIR/deployments/governance.json"
+L1_BASKET="$L1_DIR/deployments/basket.json"
 L1_TOKENS="$L1_DIR/deployments/tokens.json"
 L2_DEPLOY="$L2_DIR/deployment.json"
 
@@ -645,7 +720,20 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "mockAztecBridge": "$(jq -r '.mockAztecBridge' "$L1_LOCAL")",
       "chainlinkOracle": "$(jq -r '.chainlinkOracle' "$L1_LOCAL")",
       "uniswapTwap": "$(jq -r '.uniswapTwap' "$L1_LOCAL")",
-      "mockDexAggregator": "$(jq -r '.mockDexAggregator' "$L1_LOCAL")"
+      "mockDexAggregator": "$(jq -r '.mockDexAggregator' "$L1_LOCAL")",
+      "basketManager": "$(jq -r '.basketManager' "$L1_BASKET")",
+      "basketCompositionLib": "$(jq -r '.basketCompositionLib' "$L1_LOCAL")"
+    },
+    "basket": {
+      "manager": "$(jq -r '.basketManager' "$L1_BASKET")",
+      "allowedRouter": "$(jq -r '.allowedRouter' "$L1_BASKET")",
+      "votingWindow": $(jq -r '.votingWindow' "$L1_BASKET"),
+      "executionDelay": $(jq -r '.executionDelay' "$L1_BASKET"),
+      "votingWindowFloor": $(jq -r '.votingWindowFloor' "$L1_BASKET"),
+      "executionDelayFloor": $(jq -r '.executionDelayFloor' "$L1_BASKET"),
+      "quorumBps": $(jq -r '.quorumBps' "$L1_BASKET"),
+      "majorityBps": $(jq -r '.majorityBps' "$L1_BASKET"),
+      "priceSources": $(jq -c '.priceSources' "$L1_TOKENS")
     },
     "governance": {
       "authority": "$(jq -r '.authority' "$L1_GOV")",
@@ -696,6 +784,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_BRIDGE_GUARD_ADDRESS": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
     "VITE_TREASURY_ADDRESS": "$(jq -r '.treasury' "$L1_LOCAL")",
     "VITE_INSURANCE_FUND_ADDRESS": "$(jq -r '.insuranceFund' "$L1_LOCAL")",
+    "VITE_BASKET_MANAGER_ADDRESS": "$(jq -r '.basketManager' "$L1_BASKET")",
     "VITE_TOKEN_PORTAL_ADDRESS": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
     "VITE_FEE_JUICE_PORTAL_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuicePortal' "$L2_DEPLOY")",
     "VITE_FEE_JUICE_L1_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
