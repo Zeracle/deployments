@@ -261,6 +261,35 @@ L1_DIR="$L1_DIR" ETH_RPC_URL="$ETH_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIV
   bash "$SCRIPT_DIR/install-mock-feeds.sh"
 ok "Price feeds verified"
 
+# Chainlink USD feeds. Unlike a token address these are NOT deployment-specific:
+# install-mock-feeds.sh installs its mock aggregators AT the canonical mainnet
+# addresses, so the pool, the DEX mock, the DepositAdapter and the web app all read
+# one price. Defined here because the next check needs them; reused for the web env
+# further down.
+FEED_LUSD_USD=0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0
+FEED_USDT_USD=0x3E7d1eAB13ad0104d2750B8863b489D65364e32D
+FEED_USDC_USD=0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6
+FEED_ETH_USD=0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419
+FEED_BTC_USD=0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c
+
+# USDC and WETH are accepted as deposit INPUTS but are not basket legs, so
+# LiquidityPool.getAssetValueUsd reverts "Unsupported asset" for them. DepositAdapter
+# prices them through its own `inputPriceFeeds` map instead (wired by DeployMocks).
+# Unwired, a USDC or WETH deposit quotes correctly in the UI and then reverts on chain
+# in the adapter's slippage check — a failure that only shows up at a user's first
+# deposit. Assert it here, at deploy time, and against the SAME canonical addresses the
+# web env below exports, so all three can never silently disagree.
+step "Verifying DepositAdapter entry-asset price feeds..."
+for entry in "USDC:$FEED_USDC_USD" "WETH:$FEED_ETH_USD"; do
+  sym="${entry%%:*}"; want="${entry##*:}"
+  tok=$(jq -r --arg s "$sym" '.[$s]' "$L1_DIR/deployments/tokens.json")
+  [ -n "$tok" ] && [ "$tok" != "null" ] || fail "$sym missing from $L1_DIR/deployments/tokens.json — DeployMocks did not deploy it."
+  got=$(cast call "$ADAPTER" "inputPriceFeeds(address)(address)" "$tok" --rpc-url "$ETH_RPC_URL")
+  [ "$(echo "$got" | tr '[:upper:]' '[:lower:]')" = "$(echo "$want" | tr '[:upper:]' '[:lower:]')" ] \
+    || fail "DepositAdapter.inputPriceFeeds($sym $tok) is $got, expected $want — entry-token deposits of $sym WILL revert on chain. Confirm DeployMocks step 3b ran."
+  ok "  $sym -> $want"
+done
+
 # ===========================================================================
 # 3. Deploy L1 TokenPortal Bridge
 # ===========================================================================
@@ -492,16 +521,10 @@ WBTC=$(jq -r '.WBTC' "$L1_DIR/deployments/tokens.json")
 PAXG=$(jq -r '.PAXG' "$L1_DIR/deployments/tokens.json")
 PAXS=$(jq -r '.PAXS' "$L1_DIR/deployments/tokens.json")
 
-# Chainlink USD feeds. Unlike a token address these are NOT deployment-specific:
-# install-mock-feeds.sh installs its mock aggregators AT the canonical mainnet
-# addresses so the pool, the DEX mock and the web app all read one price. The web
-# app needs them because a non-basket deposit input (ETH/USDC) can only be priced
-# through ChainlinkOracleWrapper.getPrice(feed) — the pool reverts on it.
-FEED_LUSD_USD=0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0
-FEED_USDT_USD=0x3E7d1eAB13ad0104d2750B8863b489D65364e32D
-FEED_USDC_USD=0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6
-FEED_ETH_USD=0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419
-FEED_BTC_USD=0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c
+# Chainlink USD feed addresses (FEED_*) are set at the price-feed stage above, where
+# they are also asserted against DepositAdapter.inputPriceFeeds. The web app needs them
+# because a non-basket deposit input (ETH/USDC) can only be priced through
+# ChainlinkOracleWrapper.getPrice(feed) — the pool reverts on it.
 
 if [ "$CHAIN_HOST_HEADLESS" = 0 ]; then
 cat > "$ENV_FILE" << EOF

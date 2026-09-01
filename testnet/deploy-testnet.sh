@@ -424,6 +424,45 @@ stage_l1_deploy() {
     bash "$ROOT_DIR/deployments/sandbox-local/install-mock-feeds.sh"
   ok "Mock price feeds installed"
 
+  # Entry-asset (USDC/WETH) input pricing.
+  #
+  # These two are accepted as deposit INPUTS but are not basket legs, so the pool
+  # refuses to value them; DepositAdapter prices them through `inputPriceFeeds`,
+  # which `deploy-mocks-testnet` above wired to the CANONICAL MAINNET feed addresses
+  # (the only ones the repo has — they are what the web config and
+  # install-mock-feeds.sh use, so sandbox stays consistent).
+  #
+  # KNOWN TESTNET GAP: there are no Sepolia feed addresses for the entry tokens in
+  # this repo, and mainnet feed addresses have no code on Sepolia. The wiring is
+  # therefore correct-but-inert on a live Sepolia run: every USDC or WETH deposit
+  # will revert inside the adapter's slippage check. Basket legs (LUSD/USDT/WBTC/
+  # DAI/PAXG/PAXS) are unaffected — they are priced by the pool.
+  #
+  # Closing it means supplying real Sepolia aggregator addresses and calling
+  # DepositAdapter.setInputPriceFeed(token, feed) for each, AND setting the matching
+  # VITE_{USDC,ETH}_USD_FEED_ADDRESS in the web env so the off-chain quote and the
+  # on-chain check agree. Addresses are deliberately NOT invented here.
+  step "L1: verifying entry-asset (USDC/WETH) input price feeds..."
+  entry_gap=0
+  for entry in "USDC:0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6" "WETH:0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"; do
+    sym="${entry%%:*}"; want="${entry##*:}"
+    tok=$(jq -r --arg s "$sym" '.[$s]' deployments/tokens-testnet.json)
+    [ -n "$tok" ] && [ "$tok" != "null" ] || fail "$sym missing from deployments/tokens-testnet.json — 'make deploy-mocks-testnet' did not deploy it."
+    got=$(cast call "$DEPOSIT_ADAPTER" "inputPriceFeeds(address)(address)" "$tok" --rpc-url "$TESTNET_L1_RPC_URL")
+    [ "$(echo "$got" | tr '[:upper:]' '[:lower:]')" = "$(echo "$want" | tr '[:upper:]' '[:lower:]')" ] \
+      || fail "DepositAdapter.inputPriceFeeds($sym $tok) is $got, expected $want — 'make deploy-mocks-testnet' did not run DeployMocks step 3b."
+    feed_code=$(cast code "$want" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -z "$feed_code" ] || [ "$feed_code" = "0x" ]; then
+      warn "$sym feed $want has NO CODE on this chain — $sym deposits WILL REVERT. This is the known Sepolia entry-token feed gap (see the comment above)."
+      entry_gap=1
+    else
+      ok "  $sym -> $want (live)"
+    fi
+  done
+  if [ "$entry_gap" = 1 ]; then
+    warn "Entry tokens USDC and WETH are NOT usable on this chain. LUSD / USDT / WBTC deposits are unaffected."
+  fi
+
   step "L1: deploying TokenPortal bridge (Sepolia)..."
   INBOX_ADDRESS="$L1_INBOX_ADDRESS" ROLLUP_ADDRESS="$L1_ROLLUP_ADDRESS" \
     ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
