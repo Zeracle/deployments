@@ -407,6 +407,7 @@ stage_l1_deploy() {
   [ -f deployments/tokens-testnet.json ] || fail "v1-l1/deployments/tokens-testnet.json was not created by 'make deploy-mocks-testnet'. Check the forge output above for the actual failure."
   ok "LUSD:  $(jq -r '.LUSD' deployments/tokens-testnet.json)"
   ok "USDT:  $(jq -r '.USDT' deployments/tokens-testnet.json)"
+  ok "USDC:  $(jq -r '.USDC' deployments/tokens-testnet.json)"
   ok "DAI:   $(jq -r '.DAI' deployments/tokens-testnet.json)"
   ok "WETH:  $(jq -r '.WETH' deployments/tokens-testnet.json)"
   ok "WBTC:  $(jq -r '.WBTC' deployments/tokens-testnet.json)"
@@ -755,6 +756,7 @@ stage_manifest_sync() {
     "tokens": {
       "LUSD": { "address": "$(jq -r '.LUSD' "$L1_TOKENS")", "decimals": 18 },
       "USDT": { "address": "$(jq -r '.USDT' "$L1_TOKENS")", "decimals": 6 },
+      "USDC": { "address": "$(jq -r '.USDC' "$L1_TOKENS")", "decimals": 6 },
       "DAI":  { "address": "$(jq -r '.DAI' "$L1_TOKENS")",  "decimals": 18 },
       "WETH": { "address": "$(jq -r '.WETH' "$L1_TOKENS")", "decimals": 18 },
       "WBTC": { "address": "$(jq -r '.WBTC' "$L1_TOKENS")", "decimals": 8 },
@@ -789,6 +791,7 @@ stage_manifest_sync() {
     "VITE_SPONSORED_FPC_ADDRESS": "$(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY")",
     "VITE_LUSD_L1_ADDRESS": "$(jq -r '.LUSD' "$L1_TOKENS")",
     "VITE_USDT_L1_ADDRESS": "$(jq -r '.USDT' "$L1_TOKENS")",
+    "VITE_USDC_L1_ADDRESS": "$(jq -r '.USDC' "$L1_TOKENS")",
     "VITE_DAI_L1_ADDRESS": "$(jq -r '.DAI' "$L1_TOKENS")",
     "VITE_WETH_L1_ADDRESS": "$(jq -r '.WETH' "$L1_TOKENS")",
     "VITE_WBTC_L1_ADDRESS": "$(jq -r '.WBTC' "$L1_TOKENS")",
@@ -827,7 +830,7 @@ MANIFEST
     InsuranceFund:      $(jq -r '.insuranceFund' "$L1_LOCAL")
     BasketManager:      $(jq -r '.basketManager' "$L1_BASKET")
     TokenPortal:        $(jq -r '.tokenPortal' "$L1_BRIDGE") (wired to L2 TokenBridge below)
-    LUSD / USDT / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
+    LUSD / USDT / USDC / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
 
   L2 (Aztec testnet, $AZTEC_NODE_URL):
     ZeracleToken:       $(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")

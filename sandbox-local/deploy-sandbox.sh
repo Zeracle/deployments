@@ -480,6 +480,29 @@ ADAPTER=$(jq -r '.depositAdapter' "$L1_DIR/deployments/local.json")
 BRIDGE_GUARD_WEB=$(jq -r '.bridgeGuard' "$L1_DIR/deployments/local.json")
 LUSD=$(jq -r '.mockLusd' "$L1_DIR/deployments/local.json")
 
+# All token addresses from tokens.json. Read here (not in the chain-view stage
+# below) because the web app needs the ENTRY token addresses too: without them
+# config/tokens.ts falls back to mainnet addresses that have no code on the
+# sandbox, and every balance read for that token fails.
+USDT=$(jq -r '.USDT' "$L1_DIR/deployments/tokens.json")
+USDC=$(jq -r '.USDC' "$L1_DIR/deployments/tokens.json")
+DAI=$(jq  -r '.DAI'  "$L1_DIR/deployments/tokens.json")
+WETH=$(jq -r '.WETH' "$L1_DIR/deployments/tokens.json")
+WBTC=$(jq -r '.WBTC' "$L1_DIR/deployments/tokens.json")
+PAXG=$(jq -r '.PAXG' "$L1_DIR/deployments/tokens.json")
+PAXS=$(jq -r '.PAXS' "$L1_DIR/deployments/tokens.json")
+
+# Chainlink USD feeds. Unlike a token address these are NOT deployment-specific:
+# install-mock-feeds.sh installs its mock aggregators AT the canonical mainnet
+# addresses so the pool, the DEX mock and the web app all read one price. The web
+# app needs them because a non-basket deposit input (ETH/USDC) can only be priced
+# through ChainlinkOracleWrapper.getPrice(feed) — the pool reverts on it.
+FEED_LUSD_USD=0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0
+FEED_USDT_USD=0x3E7d1eAB13ad0104d2750B8863b489D65364e32D
+FEED_USDC_USD=0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6
+FEED_ETH_USD=0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419
+FEED_BTC_USD=0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c
+
 if [ "$CHAIN_HOST_HEADLESS" = 0 ]; then
 cat > "$ENV_FILE" << EOF
 # Aztec L2 Sandbox
@@ -506,8 +529,22 @@ VITE_PAYMENT_ESCROW_ADDRESS=$PAYMENT_ESCROW
 VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
 VITE_COMPLIANCE_CONTRACT_ADDRESS=$COMPLIANCE
 
-# L1 Mock Token (LUSD — pool reserve / fee token)
+# L1 Mock Tokens — the deposit (entry) list plus the withdrawal outputs.
+# LUSD doubles as the pool reserve / fee token.
 VITE_LUSD_L1_ADDRESS=$LUSD
+VITE_USDT_L1_ADDRESS=$USDT
+VITE_USDC_L1_ADDRESS=$USDC
+VITE_DAI_L1_ADDRESS=$DAI
+VITE_WETH_L1_ADDRESS=$WETH
+VITE_WBTC_L1_ADDRESS=$WBTC
+VITE_PAXG_L1_ADDRESS=$PAXG
+
+# Chainlink feeds used to price a deposit input that is not a basket member.
+VITE_LUSD_USD_FEED_ADDRESS=$FEED_LUSD_USD
+VITE_USDT_USD_FEED_ADDRESS=$FEED_USDT_USD
+VITE_USDC_USD_FEED_ADDRESS=$FEED_USDC_USD
+VITE_ETH_USD_FEED_ADDRESS=$FEED_ETH_USD
+VITE_BTC_USD_FEED_ADDRESS=$FEED_BTC_USD
 EOF
 
 ok "Written $ENV_FILE"
@@ -526,13 +563,7 @@ BRIDGE_GUARD=$(jq       -r '.bridgeGuard'        "$L1_DIR/deployments/local.json
 # TREASURY/INSURANCE_FUND are read earlier (stage 2, right after LUSD) so they're
 # available for the L2 deploy's L1_TREASURY/L1_INSURANCE_FUND env vars.
 
-# All token addresses from tokens.json
-USDT=$(jq -r '.USDT' "$L1_DIR/deployments/tokens.json")
-DAI=$(jq  -r '.DAI'  "$L1_DIR/deployments/tokens.json")
-WETH=$(jq -r '.WETH' "$L1_DIR/deployments/tokens.json")
-WBTC=$(jq -r '.WBTC' "$L1_DIR/deployments/tokens.json")
-PAXG=$(jq -r '.PAXG' "$L1_DIR/deployments/tokens.json")
-PAXS=$(jq -r '.PAXS' "$L1_DIR/deployments/tokens.json")
+# Token addresses (USDT/USDC/DAI/WETH/WBTC/PAXG/PAXS) were read in stage 7a.
 
 # L2 deployer
 L2_DEPLOYER=$(jq -r '.deployer' "$L2_DIR/deployment.json")
@@ -561,6 +592,7 @@ VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
 # L1 tokens
 VITE_LUSD_L1_ADDRESS=$LUSD
 VITE_USDT_L1_ADDRESS=$USDT
+VITE_USDC_L1_ADDRESS=$USDC
 VITE_DAI_L1_ADDRESS=$DAI
 VITE_WETH_L1_ADDRESS=$WETH
 VITE_WBTC_L1_ADDRESS=$WBTC
@@ -750,6 +782,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "tokens": {
       "LUSD": { "address": "$(jq -r '.LUSD' "$L1_TOKENS")", "decimals": 18 },
       "USDT": { "address": "$(jq -r '.USDT' "$L1_TOKENS")", "decimals": 6 },
+      "USDC": { "address": "$(jq -r '.USDC' "$L1_TOKENS")", "decimals": 6 },
       "DAI":  { "address": "$(jq -r '.DAI' "$L1_TOKENS")",  "decimals": 18 },
       "WETH": { "address": "$(jq -r '.WETH' "$L1_TOKENS")", "decimals": 18 },
       "WBTC": { "address": "$(jq -r '.WBTC' "$L1_TOKENS")", "decimals": 8 },
@@ -797,11 +830,17 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_SPONSORED_FPC_ADDRESS": "$(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY")",
     "VITE_LUSD_L1_ADDRESS": "$(jq -r '.LUSD' "$L1_TOKENS")",
     "VITE_USDT_L1_ADDRESS": "$(jq -r '.USDT' "$L1_TOKENS")",
+    "VITE_USDC_L1_ADDRESS": "$(jq -r '.USDC' "$L1_TOKENS")",
     "VITE_DAI_L1_ADDRESS": "$(jq -r '.DAI' "$L1_TOKENS")",
     "VITE_WETH_L1_ADDRESS": "$(jq -r '.WETH' "$L1_TOKENS")",
     "VITE_WBTC_L1_ADDRESS": "$(jq -r '.WBTC' "$L1_TOKENS")",
     "VITE_PAXG_L1_ADDRESS": "$(jq -r '.PAXG' "$L1_TOKENS")",
-    "VITE_PAXS_L1_ADDRESS": "$(jq -r '.PAXS' "$L1_TOKENS")"
+    "VITE_PAXS_L1_ADDRESS": "$(jq -r '.PAXS' "$L1_TOKENS")",
+    "VITE_LUSD_USD_FEED_ADDRESS": "$FEED_LUSD_USD",
+    "VITE_USDT_USD_FEED_ADDRESS": "$FEED_USDT_USD",
+    "VITE_USDC_USD_FEED_ADDRESS": "$FEED_USDC_USD",
+    "VITE_ETH_USD_FEED_ADDRESS": "$FEED_ETH_USD",
+    "VITE_BTC_USD_FEED_ADDRESS": "$FEED_BTC_USD"
   }
 }
 MANIFEST
