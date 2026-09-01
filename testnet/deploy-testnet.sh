@@ -407,6 +407,7 @@ stage_l1_deploy() {
   [ -f deployments/tokens-testnet.json ] || fail "v1-l1/deployments/tokens-testnet.json was not created by 'make deploy-mocks-testnet'. Check the forge output above for the actual failure."
   ok "LUSD:  $(jq -r '.LUSD' deployments/tokens-testnet.json)"
   ok "USDT:  $(jq -r '.USDT' deployments/tokens-testnet.json)"
+  ok "USDC:  $(jq -r '.USDC' deployments/tokens-testnet.json)"
   ok "DAI:   $(jq -r '.DAI' deployments/tokens-testnet.json)"
   ok "WETH:  $(jq -r '.WETH' deployments/tokens-testnet.json)"
   ok "WBTC:  $(jq -r '.WBTC' deployments/tokens-testnet.json)"
@@ -422,6 +423,45 @@ stage_l1_deploy() {
     L1_DIR="$L1_DIR" \
     bash "$ROOT_DIR/deployments/sandbox-local/install-mock-feeds.sh"
   ok "Mock price feeds installed"
+
+  # Entry-asset (USDC/WETH) input pricing.
+  #
+  # These two are accepted as deposit INPUTS but are not basket legs, so the pool
+  # refuses to value them; DepositAdapter prices them through `inputPriceFeeds`,
+  # which `deploy-mocks-testnet` above wired to the CANONICAL MAINNET feed addresses
+  # (the only ones the repo has — they are what the web config and
+  # install-mock-feeds.sh use, so sandbox stays consistent).
+  #
+  # KNOWN TESTNET GAP: there are no Sepolia feed addresses for the entry tokens in
+  # this repo, and mainnet feed addresses have no code on Sepolia. The wiring is
+  # therefore correct-but-inert on a live Sepolia run: every USDC or WETH deposit
+  # will revert inside the adapter's slippage check. Basket legs (LUSD/USDT/WBTC/
+  # DAI/PAXG/PAXS) are unaffected — they are priced by the pool.
+  #
+  # Closing it means supplying real Sepolia aggregator addresses and calling
+  # DepositAdapter.setInputPriceFeed(token, feed) for each, AND setting the matching
+  # VITE_{USDC,ETH}_USD_FEED_ADDRESS in the web env so the off-chain quote and the
+  # on-chain check agree. Addresses are deliberately NOT invented here.
+  step "L1: verifying entry-asset (USDC/WETH) input price feeds..."
+  entry_gap=0
+  for entry in "USDC:0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6" "WETH:0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"; do
+    sym="${entry%%:*}"; want="${entry##*:}"
+    tok=$(jq -r --arg s "$sym" '.[$s]' deployments/tokens-testnet.json)
+    [ -n "$tok" ] && [ "$tok" != "null" ] || fail "$sym missing from deployments/tokens-testnet.json — 'make deploy-mocks-testnet' did not deploy it."
+    got=$(cast call "$DEPOSIT_ADAPTER" "inputPriceFeeds(address)(address)" "$tok" --rpc-url "$TESTNET_L1_RPC_URL")
+    [ "$(echo "$got" | tr '[:upper:]' '[:lower:]')" = "$(echo "$want" | tr '[:upper:]' '[:lower:]')" ] \
+      || fail "DepositAdapter.inputPriceFeeds($sym $tok) is $got, expected $want — 'make deploy-mocks-testnet' did not run DeployMocks step 3b."
+    feed_code=$(cast code "$want" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -z "$feed_code" ] || [ "$feed_code" = "0x" ]; then
+      warn "$sym feed $want has NO CODE on this chain — $sym deposits WILL REVERT. This is the known Sepolia entry-token feed gap (see the comment above)."
+      entry_gap=1
+    else
+      ok "  $sym -> $want (live)"
+    fi
+  done
+  if [ "$entry_gap" = 1 ]; then
+    warn "Entry tokens USDC and WETH are NOT usable on this chain. LUSD / USDT / WBTC deposits are unaffected."
+  fi
 
   step "L1: deploying TokenPortal bridge (Sepolia)..."
   INBOX_ADDRESS="$L1_INBOX_ADDRESS" ROLLUP_ADDRESS="$L1_ROLLUP_ADDRESS" \
@@ -755,6 +795,7 @@ stage_manifest_sync() {
     "tokens": {
       "LUSD": { "address": "$(jq -r '.LUSD' "$L1_TOKENS")", "decimals": 18 },
       "USDT": { "address": "$(jq -r '.USDT' "$L1_TOKENS")", "decimals": 6 },
+      "USDC": { "address": "$(jq -r '.USDC' "$L1_TOKENS")", "decimals": 6 },
       "DAI":  { "address": "$(jq -r '.DAI' "$L1_TOKENS")",  "decimals": 18 },
       "WETH": { "address": "$(jq -r '.WETH' "$L1_TOKENS")", "decimals": 18 },
       "WBTC": { "address": "$(jq -r '.WBTC' "$L1_TOKENS")", "decimals": 8 },
@@ -789,6 +830,7 @@ stage_manifest_sync() {
     "VITE_SPONSORED_FPC_ADDRESS": "$(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY")",
     "VITE_LUSD_L1_ADDRESS": "$(jq -r '.LUSD' "$L1_TOKENS")",
     "VITE_USDT_L1_ADDRESS": "$(jq -r '.USDT' "$L1_TOKENS")",
+    "VITE_USDC_L1_ADDRESS": "$(jq -r '.USDC' "$L1_TOKENS")",
     "VITE_DAI_L1_ADDRESS": "$(jq -r '.DAI' "$L1_TOKENS")",
     "VITE_WETH_L1_ADDRESS": "$(jq -r '.WETH' "$L1_TOKENS")",
     "VITE_WBTC_L1_ADDRESS": "$(jq -r '.WBTC' "$L1_TOKENS")",
@@ -827,7 +869,7 @@ MANIFEST
     InsuranceFund:      $(jq -r '.insuranceFund' "$L1_LOCAL")
     BasketManager:      $(jq -r '.basketManager' "$L1_BASKET")
     TokenPortal:        $(jq -r '.tokenPortal' "$L1_BRIDGE") (wired to L2 TokenBridge below)
-    LUSD / USDT / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
+    LUSD / USDT / USDC / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
 
   L2 (Aztec testnet, $AZTEC_NODE_URL):
     ZeracleToken:       $(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")

@@ -41,14 +41,21 @@ fi
 # Chainlink USD feeds are all 8-decimal. Prices chosen to match the frontend's
 # sandbox fallback table (interfaces/apps/web/src/services/oracle/priceOracle.ts)
 # so the on-chain deposit value matches the UI quote.
+#
+# ETH/USD and USDC/USD are NOT basket legs — they are entry (deposit) assets.
+# The web app prices a non-basket deposit input through the pool's own
+# ChainlinkOracleWrapper.getPrice(feed), so without these two rows there is no
+# ETH or USDC price on the sandbox at all and the deposit quote dies.
 #   feed_address : answer(8dp) : label
 FEEDS="
 0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0:100000000:LUSD/USD=\$1
 0x3E7d1eAB13ad0104d2750B8863b489D65364e32D:100000000:USDT/USD=\$1
+0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6:100000000:USDC/USD=\$1
 0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9:100000000:DAI/USD=\$1
 0x214eD9Da11D2fbe465a6fc601a91E62EbEc1a0D6:200000000000:XAU/USD=\$2000
 0x379589227b15F1a12195D3f2d90bBc9F31f95235:2500000000:XAG/USD=\$25
 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c:6000000000000:BTC/USD=\$60000
+0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419:300000000000:ETH/USD=\$3000
 "
 
 echo "install-mock-feeds: unforked anvil → installing MockPriceFeed at mainnet feed addresses ($RPC)"
