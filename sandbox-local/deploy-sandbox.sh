@@ -248,7 +248,7 @@ POOL=$(jq -r '.liquidityPoolProxy' deployments/local.json)
 ADAPTER=$(jq -r '.depositAdapter' deployments/local.json)
 LUSD=$(jq -r '.mockLusd' deployments/local.json)
 TREASURY=$(jq -r '.treasury' deployments/local.json)
-INSURANCE_FUND=$(jq -r '.insuranceFund' deployments/local.json)
+COLLATERAL_RESERVE=$(jq -r '.collateralReserve' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
@@ -322,7 +322,7 @@ step "Deploying L2 contracts (clean)..."
 # G1: the FeeDistribution test_* helpers are switched by a deploy-time immutable; the sandbox
 # is the only environment that turns them on (jest suites + demo seeding rely on them).
 # real L1 fee sinks for flush_fees_to_l1 → TokenPortal.claimFees
-ZERACLE_ENABLE_TEST_HELPERS=1 L1_TOKEN_PORTAL="$TOKEN_PORTAL" L1_TREASURY="$TREASURY" L1_INSURANCE_FUND="$INSURANCE_FUND" yarn deploy:clean
+ZERACLE_ENABLE_TEST_HELPERS=1 L1_TOKEN_PORTAL="$TOKEN_PORTAL" L1_TREASURY="$TREASURY" L1_COLLATERAL_RESERVE="$COLLATERAL_RESERVE" yarn deploy:clean
 ok "L2 contracts deployed (FeeDistribution test helpers ENABLED — sandbox only)"
 
 [ -f deployment.json ] || fail "deployment.json not created"
@@ -583,8 +583,8 @@ CHAIN_VIEW_ENV="$ROOT_DIR/chain-view/.env.local"
 # Additional L1 addresses chain-view needs
 WITHDRAWAL_ADAPTER=$(jq -r '.withdrawalAdapter'  "$L1_DIR/deployments/local.json")
 BRIDGE_GUARD=$(jq       -r '.bridgeGuard'        "$L1_DIR/deployments/local.json")
-# TREASURY/INSURANCE_FUND are read earlier (stage 2, right after LUSD) so they're
-# available for the L2 deploy's L1_TREASURY/L1_INSURANCE_FUND env vars.
+# TREASURY/COLLATERAL_RESERVE are read earlier (stage 2, right after LUSD) so they're
+# available for the L2 deploy's L1_TREASURY/L1_COLLATERAL_RESERVE env vars.
 
 # Token addresses (USDT/USDC/DAI/WETH/WBTC/PAXG/PAXS) were read in stage 7a.
 
@@ -604,7 +604,7 @@ VITE_DEPOSIT_ADAPTER_ADDRESS=$ADAPTER
 VITE_WITHDRAWAL_ADAPTER_ADDRESS=$WITHDRAWAL_ADAPTER
 VITE_BRIDGE_GUARD_ADDRESS=$BRIDGE_GUARD
 VITE_TREASURY_ADDRESS=$TREASURY
-VITE_INSURANCE_FUND_ADDRESS=$INSURANCE_FUND
+VITE_COLLATERAL_RESERVE_ADDRESS=$COLLATERAL_RESERVE
 VITE_BASKET_MANAGER_ADDRESS=$BASKET_MANAGER
 VITE_TOKEN_PORTAL_ADDRESS=$TOKEN_PORTAL
 VITE_FEE_JUICE_PORTAL_ADDRESS=$FEE_JUICE_PORTAL
@@ -767,7 +767,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "withdrawalAdapter": "$(jq -r '.withdrawalAdapter' "$L1_LOCAL")",
       "bridgeGuard": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
       "treasury": "$(jq -r '.treasury' "$L1_LOCAL")",
-      "insuranceFund": "$(jq -r '.insuranceFund' "$L1_LOCAL")",
+      "collateralReserve": "$(jq -r '.collateralReserve' "$L1_LOCAL")",
       "tokenPortal": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
       "feeJuicePortal": "$(jq -r '.l1ContractAddresses.feeJuicePortal' "$L2_DEPLOY")",
       "feeJuice": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
@@ -839,7 +839,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_WITHDRAWAL_ADAPTER_ADDRESS": "$(jq -r '.withdrawalAdapter' "$L1_LOCAL")",
     "VITE_BRIDGE_GUARD_ADDRESS": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
     "VITE_TREASURY_ADDRESS": "$(jq -r '.treasury' "$L1_LOCAL")",
-    "VITE_INSURANCE_FUND_ADDRESS": "$(jq -r '.insuranceFund' "$L1_LOCAL")",
+    "VITE_COLLATERAL_RESERVE_ADDRESS": "$(jq -r '.collateralReserve' "$L1_LOCAL")",
     "VITE_BASKET_MANAGER_ADDRESS": "$(jq -r '.basketManager' "$L1_BASKET")",
     "VITE_TOKEN_PORTAL_ADDRESS": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
     "VITE_FEE_JUICE_PORTAL_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuicePortal' "$L2_DEPLOY")",

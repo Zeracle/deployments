@@ -393,13 +393,13 @@ stage_l1_deploy() {
   WITHDRAWAL_ADAPTER=$(jq -r '.withdrawalAdapter' deployments/local-testnet.json)
   BRIDGE_GUARD=$(jq -r '.bridgeGuard' deployments/local-testnet.json)
   TREASURY=$(jq -r '.treasury' deployments/local-testnet.json)
-  INSURANCE_FUND=$(jq -r '.insuranceFund' deployments/local-testnet.json)
+  COLLATERAL_RESERVE=$(jq -r '.collateralReserve' deployments/local-testnet.json)
   ok "LiquidityPool:     $LIQUIDITY_POOL_PROXY"
   ok "DepositAdapter:    $DEPOSIT_ADAPTER"
   ok "WithdrawalAdapter: $WITHDRAWAL_ADAPTER"
   ok "BridgeGuard:       $BRIDGE_GUARD"
   ok "Treasury:          $TREASURY"
-  ok "InsuranceFund:     $INSURANCE_FUND"
+  ok "CollateralReserve:     $COLLATERAL_RESERVE"
 
   step "L1: deploying mock tokens (Sepolia)..."
   ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
@@ -516,7 +516,7 @@ stage_l2_deploy() {
     L1_FEE_JUICE_PORTAL_ADDRESS="$L1_FEE_JUICE_PORTAL_ADDRESS" \
     L1_TOKEN_PORTAL="$TOKEN_PORTAL" \
     L1_TREASURY="$TREASURY" \
-    L1_INSURANCE_FUND="$INSURANCE_FUND" \
+    L1_COLLATERAL_RESERVE="$COLLATERAL_RESERVE" \
     DEPLOY_TX_TIMEOUT_SECS=600 \
     ETH_CHAIN_ID=11155111 \
     yarn deploy:clean
@@ -757,7 +757,7 @@ stage_manifest_sync() {
       "withdrawalAdapter": "$(jq -r '.withdrawalAdapter' "$L1_LOCAL")",
       "bridgeGuard": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
       "treasury": "$(jq -r '.treasury' "$L1_LOCAL")",
-      "insuranceFund": "$(jq -r '.insuranceFund' "$L1_LOCAL")",
+      "collateralReserve": "$(jq -r '.collateralReserve' "$L1_LOCAL")",
       "tokenPortal": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
       "feeJuicePortal": "$(jq -r '.l1ContractAddresses.feeJuicePortal' "$L2_DEPLOY")",
       "feeJuice": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
@@ -820,7 +820,7 @@ stage_manifest_sync() {
     "VITE_WITHDRAWAL_ADAPTER_ADDRESS": "$(jq -r '.withdrawalAdapter' "$L1_LOCAL")",
     "VITE_BRIDGE_GUARD_ADDRESS": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
     "VITE_TREASURY_ADDRESS": "$(jq -r '.treasury' "$L1_LOCAL")",
-    "VITE_INSURANCE_FUND_ADDRESS": "$(jq -r '.insuranceFund' "$L1_LOCAL")",
+    "VITE_COLLATERAL_RESERVE_ADDRESS": "$(jq -r '.collateralReserve' "$L1_LOCAL")",
     "VITE_BASKET_MANAGER_ADDRESS": "$(jq -r '.basketManager' "$L1_BASKET")",
     "VITE_TOKEN_PORTAL_ADDRESS": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
     "VITE_ZRCL_CONTRACT_ADDRESS": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
@@ -866,7 +866,7 @@ MANIFEST
     WithdrawalAdapter:  $(jq -r '.withdrawalAdapter' "$L1_LOCAL")
     BridgeGuard:        $(jq -r '.bridgeGuard' "$L1_LOCAL")
     Treasury:           $(jq -r '.treasury' "$L1_LOCAL")
-    InsuranceFund:      $(jq -r '.insuranceFund' "$L1_LOCAL")
+    CollateralReserve:      $(jq -r '.collateralReserve' "$L1_LOCAL")
     BasketManager:      $(jq -r '.basketManager' "$L1_BASKET")
     TokenPortal:        $(jq -r '.tokenPortal' "$L1_BRIDGE") (wired to L2 TokenBridge below)
     LUSD / USDT / USDC / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
