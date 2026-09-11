@@ -661,16 +661,24 @@ ok "Stale PXE state cleared"
 # every N seconds to keep block.timestamp current.
 # ===========================================================================
 
-step "Starting L2 block producer (60s interval)..."
-cd "$L2_DIR"
-setsid nohup bash scripts/sandbox-block-producer.sh --loop 60 > /tmp/zeracle-block-producer.log 2>&1 < /dev/null &
-BLOCK_PRODUCER_PID=$!
-disown "$BLOCK_PRODUCER_PID" 2>/dev/null || true
-sleep 2
-if kill -0 "$BLOCK_PRODUCER_PID" 2>/dev/null; then
-  ok "Block producer running (PID $BLOCK_PRODUCER_PID, log: /tmp/zeracle-block-producer.log)"
+# Headless (EC2): the systemd `block-producer` unit owns this loop, and the
+# caller starts it after the deploy. Spawning one here as well left two
+# producers racing trigger-l2-block against the same sandbox — the detached
+# copy is invisible to systemd, so nothing ever stopped it.
+if [ "$CHAIN_HOST_HEADLESS" = 0 ]; then
+  step "Starting L2 block producer (60s interval)..."
+  cd "$L2_DIR"
+  setsid nohup bash scripts/sandbox-block-producer.sh --loop 60 > /tmp/zeracle-block-producer.log 2>&1 < /dev/null &
+  BLOCK_PRODUCER_PID=$!
+  disown "$BLOCK_PRODUCER_PID" 2>/dev/null || true
+  sleep 2
+  if kill -0 "$BLOCK_PRODUCER_PID" 2>/dev/null; then
+    ok "Block producer running (PID $BLOCK_PRODUCER_PID, log: /tmp/zeracle-block-producer.log)"
+  else
+    warn "Block producer exited immediately — check /tmp/zeracle-block-producer.log"
+  fi
 else
-  warn "Block producer exited immediately — check /tmp/zeracle-block-producer.log"
+  step "Headless: not starting a block producer — the systemd block-producer unit owns it."
 fi
 
 # ===========================================================================
