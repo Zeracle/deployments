@@ -249,6 +249,7 @@ ADAPTER=$(jq -r '.depositAdapter' deployments/local.json)
 LUSD=$(jq -r '.mockLusd' deployments/local.json)
 TREASURY=$(jq -r '.treasury' deployments/local.json)
 COLLATERAL_RESERVE=$(jq -r '.collateralReserve' deployments/local.json)
+NETWORK_FUND=$(jq -r '.networkFund' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
@@ -322,7 +323,7 @@ step "Deploying L2 contracts (clean)..."
 # G1: the FeeDistribution test_* helpers are switched by a deploy-time immutable; the sandbox
 # is the only environment that turns them on (jest suites + demo seeding rely on them).
 # real L1 fee sinks for flush_fees_to_l1 → TokenPortal.claimFees
-ZERACLE_ENABLE_TEST_HELPERS=1 L1_TOKEN_PORTAL="$TOKEN_PORTAL" L1_TREASURY="$TREASURY" L1_COLLATERAL_RESERVE="$COLLATERAL_RESERVE" yarn deploy:clean
+ZERACLE_ENABLE_TEST_HELPERS=1 L1_TOKEN_PORTAL="$TOKEN_PORTAL" L1_TREASURY="$TREASURY" L1_COLLATERAL_RESERVE="$COLLATERAL_RESERVE" L1_NETWORK_FUND="$NETWORK_FUND" yarn deploy:clean
 ok "L2 contracts deployed (FeeDistribution test helpers ENABLED — sandbox only)"
 
 [ -f deployment.json ] || fail "deployment.json not created"
@@ -583,8 +584,8 @@ CHAIN_VIEW_ENV="$ROOT_DIR/chain-view/.env.local"
 # Additional L1 addresses chain-view needs
 WITHDRAWAL_ADAPTER=$(jq -r '.withdrawalAdapter'  "$L1_DIR/deployments/local.json")
 BRIDGE_GUARD=$(jq       -r '.bridgeGuard'        "$L1_DIR/deployments/local.json")
-# TREASURY/COLLATERAL_RESERVE are read earlier (stage 2, right after LUSD) so they're
-# available for the L2 deploy's L1_TREASURY/L1_COLLATERAL_RESERVE env vars.
+# TREASURY/COLLATERAL_RESERVE/NETWORK_FUND are read earlier (stage 2, right after LUSD) so they're
+# available for the L2 deploy's L1_TREASURY/L1_COLLATERAL_RESERVE/L1_NETWORK_FUND env vars.
 
 # Token addresses (USDT/USDC/DAI/WETH/WBTC/PAXG/PAXS) were read in stage 7a.
 
@@ -776,6 +777,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "bridgeGuard": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
       "treasury": "$(jq -r '.treasury' "$L1_LOCAL")",
       "collateralReserve": "$(jq -r '.collateralReserve' "$L1_LOCAL")",
+      "networkFund": "$(jq -r '.networkFund' "$L1_LOCAL")",
       "tokenPortal": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
       "feeJuicePortal": "$(jq -r '.l1ContractAddresses.feeJuicePortal' "$L2_DEPLOY")",
       "feeJuice": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",

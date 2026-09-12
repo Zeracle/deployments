@@ -394,12 +394,14 @@ stage_l1_deploy() {
   BRIDGE_GUARD=$(jq -r '.bridgeGuard' deployments/local-testnet.json)
   TREASURY=$(jq -r '.treasury' deployments/local-testnet.json)
   COLLATERAL_RESERVE=$(jq -r '.collateralReserve' deployments/local-testnet.json)
+  NETWORK_FUND=$(jq -r '.networkFund' deployments/local-testnet.json)
   ok "LiquidityPool:     $LIQUIDITY_POOL_PROXY"
   ok "DepositAdapter:    $DEPOSIT_ADAPTER"
   ok "WithdrawalAdapter: $WITHDRAWAL_ADAPTER"
   ok "BridgeGuard:       $BRIDGE_GUARD"
   ok "Treasury:          $TREASURY"
   ok "CollateralReserve:     $COLLATERAL_RESERVE"
+  ok "NetworkFund:       $NETWORK_FUND"
 
   step "L1: deploying mock tokens (Sepolia)..."
   ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
@@ -517,6 +519,7 @@ stage_l2_deploy() {
     L1_TOKEN_PORTAL="$TOKEN_PORTAL" \
     L1_TREASURY="$TREASURY" \
     L1_COLLATERAL_RESERVE="$COLLATERAL_RESERVE" \
+    L1_NETWORK_FUND="$NETWORK_FUND" \
     DEPLOY_TX_TIMEOUT_SECS=600 \
     ETH_CHAIN_ID=11155111 \
     yarn deploy:clean
@@ -758,6 +761,7 @@ stage_manifest_sync() {
       "bridgeGuard": "$(jq -r '.bridgeGuard' "$L1_LOCAL")",
       "treasury": "$(jq -r '.treasury' "$L1_LOCAL")",
       "collateralReserve": "$(jq -r '.collateralReserve' "$L1_LOCAL")",
+      "networkFund": "$(jq -r '.networkFund' "$L1_LOCAL")",
       "tokenPortal": "$(jq -r '.tokenPortal' "$L1_BRIDGE")",
       "feeJuicePortal": "$(jq -r '.l1ContractAddresses.feeJuicePortal' "$L2_DEPLOY")",
       "feeJuice": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
@@ -867,6 +871,7 @@ MANIFEST
     BridgeGuard:        $(jq -r '.bridgeGuard' "$L1_LOCAL")
     Treasury:           $(jq -r '.treasury' "$L1_LOCAL")
     CollateralReserve:      $(jq -r '.collateralReserve' "$L1_LOCAL")
+    NetworkFund:        $(jq -r '.networkFund' "$L1_LOCAL")
     BasketManager:      $(jq -r '.basketManager' "$L1_BASKET")
     TokenPortal:        $(jq -r '.tokenPortal' "$L1_BRIDGE") (wired to L2 TokenBridge below)
     LUSD / USDT / USDC / DAI / WETH / WBTC / PAXG / PAXS: see $L1_TOKENS
