@@ -15,3 +15,6 @@
 # to <zeracle root>/dist/ since 2026-09-13; a committed one leaked the sandbox
 # attestor key (readiness review S1).
 *.tar.gz
+
+# Regenerated on every local redeploy.
+sandbox-local/public-manifest.json
