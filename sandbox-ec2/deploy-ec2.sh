@@ -49,8 +49,10 @@ if [ "${1:-}" = "--apply" ]; then
 fi
 
 step "Building release tarball..."
-bash "$TARBALL_SCRIPT"
-ok "Release tarball built: $SCRIPT_DIR/zeracle-chain.tar.gz"
+# Outside every repo: the zeracle root is not a git repository.
+TARBALL_OUT="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/zeracle-chain.tar.gz"
+bash "$TARBALL_SCRIPT" "$TARBALL_OUT"
+ok "Release tarball built: $TARBALL_OUT"
 
 if [ "$APPLY" = true ]; then
   step "Running terraform apply in $EC2_DIR (interactive — review the plan before confirming)..."
