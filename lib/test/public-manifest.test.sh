@@ -8,7 +8,7 @@ run() {
     PM_PUBLIC_L1_RPC=http://localhost:8545 PM_PUBLIC_AZTEC_NODE=http://localhost:8080 \
     PM_PUBLIC_CHAIN_SERVER=http://localhost:3001 \
     PM_NODE_INFO_FILE="$FX/node-info.json" PM_EXPECTED_FILE="$FX/expected.json" PM_DEPLOY_BLOCK=7 \
-    PM_SOURCES_JSON='{"v1-l1":"test","v1-l2":"test","deployments":"test"}' \
+    PM_SOURCES_JSON='{"v1-l1":"0000001","v1-l2":"0000002","deployments":"0000003"}' \
     "$@" bash "$HERE/../public-manifest.sh"
 }
 check() { jq -e "$1" "$OUT/pm.json" >/dev/null || { echo "FAIL: $1"; exit 1; }; }
@@ -27,6 +27,16 @@ if run PM_PUBLIC_L1_RPC=https://eth-mainnet.g.alchemy.com/v2/AbCdEfGhIjKlMnOpQrS
   echo "FAIL: keyed RPC accepted"; exit 1
 fi
 grep -q 'carries credentials' "$OUT/err" || { echo "FAIL: wrong refusal message"; cat "$OUT/err"; exit 1; }
+
+if run PM_PUBLIC_L1_RPC=https://x.quiknode.pro/0123456789abcdef0123456789abcdef/ >/dev/null 2>"$OUT/err-quicknode"; then
+  echo "FAIL: QuickNode-style keyed RPC accepted"; exit 1
+fi
+grep -q 'carries credentials' "$OUT/err-quicknode" || { echo "FAIL: wrong refusal message (quicknode)"; cat "$OUT/err-quicknode"; exit 1; }
+
+if run PM_PUBLIC_AZTEC_NODE='https://example.drpc.org/rpc?dkey=abc' >/dev/null 2>"$OUT/err-drpc"; then
+  echo "FAIL: dRPC-style keyed RPC (query param) accepted"; exit 1
+fi
+grep -q 'carries credentials' "$OUT/err-drpc" || { echo "FAIL: wrong refusal message (drpc)"; cat "$OUT/err-drpc"; exit 1; }
 
 CV="$HERE/../../../chain-view"
 if [ -d "$CV/node_modules" ]; then npm --prefix "$CV" run -s validate-manifest -- "$OUT/pm.json"; fi

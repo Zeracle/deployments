@@ -73,6 +73,7 @@ jq -n \
   --slurpfile gov "$GOV" --slurpfile basket "$BASKET" --slurpfile l2 "$L2" \
   --argjson ni "$NODE_INFO" --argjson expected "$EXPECTED" '
   def nn: if . == null or . == "" then null else . end;
+  def nz: if type == "string" and test("^0x0{40}$"; "i") then null else . end;
   ($local[0]) as $L | ($tokens[0]) as $T | ($l2[0]) as $D | ($gov[0]) as $G | ($ni.l1ContractAddresses) as $A |
   {
     schema: "zeracle.env/v1",
@@ -95,7 +96,7 @@ jq -n \
                | map(select($T[.[0]] != null) | {key: .[0], value: {address: $T[.[0]], decimals: .[1]}})
                | from_entries),
       governance: {authority: $G.authority, timelock: $G.timelock, validator: $G.validator, admin: $G.admin,
-                   guardian: $G.guardian, proposers: ([$G.proposer, $G.proposer2] | map(nn) | map(select(. != null))),
+                   guardian: $G.guardian, proposers: ([$G.proposer, $G.proposer2] | map(nn | nz) | map(select(. != null))),
                    transitionAt: $G.transitionAt, timelockDelay: $G.timelockDelay, executionWindow: $G.executionWindow},
       aztec: {rollup: $A.rollupAddress, inbox: $A.inboxAddress, registry: $A.registryAddress,
               feeJuicePortal: $A.feeJuicePortalAddress, feeJuice: $A.feeJuiceAddress, nodeVersion: $ni.nodeVersion}
@@ -112,14 +113,50 @@ jq -n \
     thresholds: {}
   }' > "$TMP"
 
-# Deny-list, same rules as chain-view src/env/secrets.ts.
+# Deny-list, same rules as chain-view src/env/secrets.ts (commit d024d72):
+# key names matched anywhere (unanchored, case-insensitive), and a URL is
+# credentialed if it has userinfo, any >=20-char [A-Za-z0-9_-] path segment
+# (Alchemy/Infura/QuickNode/Blast/Ankr-style provider keys), or a query
+# param whose NAME (not value) matches key|token|auth|secret.
 if jq -e '[paths(scalars) | map(tostring) | last
-          | test("^(private_?key|secret_?key|signing_?key|salt|mnemonic|seed|api_?key|password|passphrase)$"; "i")] | any' \
+          | test("private_?key|secret|signing_?key|mnemonic|seed|api_?key|password|passphrase|salt"; "i")] | any' \
      "$TMP" >/dev/null; then
   rm -f "$TMP"; die "refusing to write: a secret-looking key name is present"
 fi
-if jq -r '.. | strings' "$TMP" | grep -Eq '://[^/]*@|/v[0-9]+/[A-Za-z0-9_-]{16,}|[?&](key|apikey|api_key|token|access_token|auth)='; then
-  rm -f "$TMP"; die "refusing to write: an endpoint URL carries credentials — use a public or origin-restricted RPC"
-fi
+
+url_carries_credentials() {
+  local s="$1"
+  [[ "$s" =~ ^(https?|wss?):// ]] || return 1
+  local rest="${s#*://}"
+  local authority="${rest%%/*}"
+  [[ "$authority" == *@* ]] && return 0
+  local pathAndQuery=""
+  [[ "$rest" == */* ]] && pathAndQuery="/${rest#*/}"
+  local path="${pathAndQuery%%\?*}"
+  local query=""
+  [[ "$pathAndQuery" == *'?'* ]] && query="${pathAndQuery#*'?'}"
+  local seg segs=()
+  IFS='/' read -ra segs <<< "$path"
+  for seg in "${segs[@]}"; do
+    [[ -n "$seg" && ${#seg} -ge 20 && "$seg" =~ ^[A-Za-z0-9_-]+$ ]] && return 0
+  done
+  if [[ -n "$query" ]]; then
+    local p name lc params=()
+    IFS='&' read -ra params <<< "$query"
+    for p in "${params[@]}"; do
+      name="${p%%=*}"
+      lc=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+      [[ "$lc" =~ (key|token|auth|secret) ]] && return 0
+    done
+  fi
+  return 1
+}
+
+while IFS= read -r s; do
+  if url_carries_credentials "$s"; then
+    rm -f "$TMP"; die "refusing to write: an endpoint URL carries credentials — use a public or origin-restricted RPC"
+  fi
+done < <(jq -r '.. | strings' "$TMP")
+
 mv "$TMP" "$PM_OUT"
 echo "public-manifest: wrote $PM_OUT ($PM_ENV_ID)"
