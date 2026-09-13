@@ -2,12 +2,16 @@
 # any per-network .env / deployer key file added from here on, without a
 # `git add -A` accidentally committing a funded private key.
 #
-# NOTE: sandbox-local/.env is ALREADY TRACKED (holds a keyed RPC URL, no
-# private key) from before this .gitignore existed. Adding these patterns
-# does NOT untrack it — that's a deliberate no-op here; untracking it is the
-# repo owner's call, not made in this change.
+# sandbox-local/.env was tracked until 2026-09-13 (it held a keyed mainnet RPC
+# URL). It is untracked now and covered by */.env below; rotate any key that was
+# ever committed. Copy sandbox-local/.env.example to start one.
 */.env
 */.env.*
 !*/.env.example
 */deployer-account.json
 **/.env.local
+
+# Release tarballs are build output. devops make-release-tarball.sh writes them
+# to <zeracle root>/dist/ since 2026-09-13; a committed one leaked the sandbox
+# attestor key (readiness review S1).
+*.tar.gz
