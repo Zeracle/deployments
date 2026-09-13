@@ -494,7 +494,10 @@ ZRCL=$(jq -r '.contracts.zeracleToken' "$L2_DIR/deployment.json")
 BRIDGE_L2=$(jq -r '.contracts.tokenBridge' "$L2_DIR/deployment.json")
 FEE_DIST=$(jq -r '.contracts.feeDistribution' "$L2_DIR/deployment.json")
 PAYMENT_ESCROW=$(jq -r '.contracts.paymentEscrow' "$L2_DIR/deployment.json")
-COMPLIANCE=$(jq -r '.contracts.compliance' "$L2_DIR/deployment.json")
+COMPLIANCE=$(jq -r '.contracts.compliance // ""' "$L2_DIR/deployment.json")
+# ZERACLE_COMPLIANCE (v1-l2 deploy.ts). Older deployment.json files predate the
+# flag and always carried a Compliance contract, so an absent key means on.
+COMPLIANCE_ENABLED=$(jq -r 'if .complianceEnabled == false then "false" else "true" end' "$L2_DIR/deployment.json")
 TOKEN_PORTAL=$(jq -r '.tokenPortal' "$L1_DIR/deployments/bridge.json")
 
 # L1 FeeJuicePortal + fee asset — needed by the chain-view admin panel to
@@ -552,6 +555,8 @@ VITE_FEE_DISTRIBUTION_ADDRESS=$FEE_DIST
 VITE_PAYMENT_ESCROW_ADDRESS=$PAYMENT_ESCROW
 VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
 VITE_COMPLIANCE_CONTRACT_ADDRESS=$COMPLIANCE
+# Must match the L2 deploy (v1-l2 ZERACLE_COMPLIANCE) — src/config/env.ts.
+VITE_COMPLIANCE_ENABLED=$COMPLIANCE_ENABLED
 
 # L1 Mock Tokens — the deposit (entry) list plus the withdrawal outputs.
 # LUSD doubles as the pool reserve / fee token.
@@ -827,7 +832,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "pxeUrl": "$(jq -r '.network' "$L2_DEPLOY")",
     "contracts": {
       "zeracleToken": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
-      "compliance": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
+      "compliance": "$(jq -r '.contracts.compliance // ""' "$L2_DEPLOY")",
       "tokenBridge": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
       "feeDistribution": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
       "paymentEscrow": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
@@ -856,7 +861,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_FEE_JUICE_L1_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
     "VITE_FEE_ASSET_HANDLER_ADDRESS": "$(jq -r '.l1ContractAddresses.feeAssetHandler // ""' "$L2_DEPLOY")",
     "VITE_ZRCL_CONTRACT_ADDRESS": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
-    "VITE_COMPLIANCE_CONTRACT_ADDRESS": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
+    "VITE_COMPLIANCE_CONTRACT_ADDRESS": "$(jq -r '.contracts.compliance // ""' "$L2_DEPLOY")",
     "VITE_BRIDGE_CONTRACT_ADDRESS": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
     "VITE_FEE_DISTRIBUTION_ADDRESS": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
     "VITE_PAYMENT_ESCROW_ADDRESS": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
