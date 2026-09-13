@@ -99,6 +99,18 @@ if [ ${#MISSING_VARS[@]} -gt 0 ]; then
 fi
 ok "TESTNET_L1_RPC_URL, DEPLOYER_PRIVATE_KEY, AZTEC_NODE_URL, PUBLIC_L1_RPC all set"
 
+# I4: both endpoints this run publishes into the public manifest (chain-view)
+# must be checked for embedded credentials before anything is broadcast to
+# Sepolia — not only after, when a refusal would be far more expensive to
+# unwind. Uses the same check public-manifest.sh itself refuses a keyed
+# endpoint with, exposed as a side-effect-free mode.
+step "Preflight: checking PUBLIC_L1_RPC and AZTEC_NODE_URL carry no credentials..."
+bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$PUBLIC_L1_RPC" \
+  || fail "PUBLIC_L1_RPC carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted RPC. See $SCRIPT_DIR/.env.example."
+bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$AZTEC_NODE_URL" \
+  || fail "AZTEC_NODE_URL carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted endpoint. See $SCRIPT_DIR/.env.example."
+ok "PUBLIC_L1_RPC and AZTEC_NODE_URL carry no embedded credentials"
+
 step "Preflight: checking L1 RPC chain id (must be Sepolia 11155111)..."
 if ! L1_CHAIN_ID=$(cast chain-id --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
   fail "Could not reach TESTNET_L1_RPC_URL ($TESTNET_L1_RPC_URL): $L1_CHAIN_ID"

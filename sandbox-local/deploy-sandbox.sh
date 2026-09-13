@@ -834,6 +834,17 @@ else
   PM_ENV_ID=sandbox-local; PM_LABEL="Sandbox (local)"
   PM_PUBLIC_L1_RPC=http://localhost:8545; PM_PUBLIC_AZTEC_NODE=http://localhost:8080; PM_PUBLIC_CHAIN_SERVER=http://localhost:3001
 fi
+# C1: the EC2 release tarball excludes .git from every repo, so the
+# generator's own default (git -C ... rev-parse, used when PM_SOURCES_JSON is
+# unset) always fails there. make-release-tarball.sh writes release-sources.json
+# (the shas of the checkouts it packed) at the tarball root instead; pick it up
+# here so the EC2 box's manifest still gets real sources. An already-exported
+# PM_SOURCES_JSON always wins — never overwritten by the file.
+if [ -z "${PM_SOURCES_JSON:-}" ] && [ -f "$ROOT_DIR/release-sources.json" ]; then
+  PM_SOURCES_JSON=$(cat "$ROOT_DIR/release-sources.json")
+fi
+[ -n "${PM_SOURCES_JSON:-}" ] && export PM_SOURCES_JSON
+
 PM_ENV_ID="$PM_ENV_ID" PM_KIND=sandbox PM_LABEL="$PM_LABEL" PM_CHAIN_ID=31337 \
   PM_L1_DIR="$L1_DIR" PM_L2_DIR="$L2_DIR" PM_SUFFIX= PM_OUT="$SCRIPT_DIR/public-manifest.json" \
   PM_PUBLIC_L1_RPC="$PM_PUBLIC_L1_RPC" PM_PUBLIC_AZTEC_NODE="$PM_PUBLIC_AZTEC_NODE" PM_PUBLIC_CHAIN_SERVER="$PM_PUBLIC_CHAIN_SERVER" \
