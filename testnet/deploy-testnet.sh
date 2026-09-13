@@ -512,6 +512,10 @@ stage_l2_deploy() {
   step "L2: deploying Aztec testnet contracts + fee-juice bootstrap..."
   DEPLOYER_ACCOUNT_FILE="$SCRIPT_DIR/deployer-account.json"
   export DEPLOYER_ACCOUNT_FILE
+  # Compliance (attestor + zkPassport + bridge exit enforcement) is not part of
+  # the testnet release (owner decision 2026-09-13). ZERACLE_COMPLIANCE=off
+  # deploys no Compliance contract and gives the bridge AztecAddress.ZERO (exit
+  # enforcement disabled); deploy.ts refuses a live-network deploy without it.
   AZTEC_RPC_HOST="$AZTEC_NODE_URL" \
     L1_RPC_URL="$TESTNET_L1_RPC_URL" \
     L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
@@ -522,8 +526,12 @@ stage_l2_deploy() {
     L1_NETWORK_FUND="$NETWORK_FUND" \
     DEPLOY_TX_TIMEOUT_SECS=600 \
     ETH_CHAIN_ID=11155111 \
+    ZERACLE_COMPLIANCE=off \
     yarn deploy:clean
   [ -f deployment.json ] || fail "v1-l2/deployment.json was not created by 'yarn deploy:clean'. Check the deploy output above for the actual failure."
+  [ "$(jq -r '.complianceEnabled' deployment.json)" = "false" ] || fail "v1-l2/deployment.json reports complianceEnabled=$(jq -r '.complianceEnabled' deployment.json) — the testnet release must deploy with ZERACLE_COMPLIANCE=off (no attestor/zkPassport on testnet)."
+  [ "$(jq -r '.contracts.compliance' deployment.json)" = "null" ] || fail "v1-l2/deployment.json lists a Compliance contract ($(jq -r '.contracts.compliance' deployment.json)) — expected none with ZERACLE_COMPLIANCE=off."
+  ok "Compliance OFF: no Compliance contract deployed; bridge exit enforcement disabled"
 
   ok "ZeracleToken:    $(jq -r '.contracts.zeracleToken' deployment.json)"
   ok "TokenBridge:     $(jq -r '.contracts.tokenBridge' deployment.json)"
@@ -856,7 +864,11 @@ MANIFEST
   sed -i "s|^VITE_AZTEC_NODE_URL=.*|VITE_AZTEC_NODE_URL=$AZTEC_NODE_URL|" "$WEB_ENV"
   sed -i "s|^VITE_ETH_RPC_URL=.*|VITE_ETH_RPC_URL=$TESTNET_L1_RPC_URL|" "$WEB_ENV"
   sed -i "s|^VITE_ETH_CHAIN_ID=.*|VITE_ETH_CHAIN_ID=11155111|" "$WEB_ENV"
-  ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_RPC_URL, VITE_ETH_CHAIN_ID filled"
+  # Must match the L2 deploy above (ZERACLE_COMPLIANCE=off): the bridge enforces
+  # nothing, so the web app must not ask anyone to verify.
+  grep -q '^VITE_COMPLIANCE_ENABLED=' "$WEB_ENV" || fail "$WEB_ENV has no VITE_COMPLIANCE_ENABLED line — src/config/env.ts refuses to boot without it."
+  sed -i "s|^VITE_COMPLIANCE_ENABLED=.*|VITE_COMPLIANCE_ENABLED=false|" "$WEB_ENV"
+  ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_RPC_URL, VITE_ETH_CHAIN_ID filled; VITE_COMPLIANCE_ENABLED=false"
 
   step "Testnet deploy summary"
   cat <<SUMMARY
