@@ -93,10 +93,23 @@ MISSING_VARS=()
 [ -n "${TESTNET_L1_RPC_URL:-}" ] || MISSING_VARS+=("TESTNET_L1_RPC_URL")
 [ -n "${DEPLOYER_PRIVATE_KEY:-}" ] || MISSING_VARS+=("DEPLOYER_PRIVATE_KEY")
 [ -n "${AZTEC_NODE_URL:-}" ] || MISSING_VARS+=("AZTEC_NODE_URL")
+[ -n "${PUBLIC_L1_RPC:-}" ] || MISSING_VARS+=("PUBLIC_L1_RPC")
 if [ ${#MISSING_VARS[@]} -gt 0 ]; then
   fail "Missing required env vars in $SCRIPT_DIR/.env: ${MISSING_VARS[*]}. See $SCRIPT_DIR/.env.example."
 fi
-ok "TESTNET_L1_RPC_URL, DEPLOYER_PRIVATE_KEY, AZTEC_NODE_URL all set"
+ok "TESTNET_L1_RPC_URL, DEPLOYER_PRIVATE_KEY, AZTEC_NODE_URL, PUBLIC_L1_RPC all set"
+
+# I4: both endpoints this run publishes into the public manifest (chain-view)
+# must be checked for embedded credentials before anything is broadcast to
+# Sepolia — not only after, when a refusal would be far more expensive to
+# unwind. Uses the same check public-manifest.sh itself refuses a keyed
+# endpoint with, exposed as a side-effect-free mode.
+step "Preflight: checking PUBLIC_L1_RPC and AZTEC_NODE_URL carry no credentials..."
+bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$PUBLIC_L1_RPC" \
+  || fail "PUBLIC_L1_RPC carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted RPC. See $SCRIPT_DIR/.env.example."
+bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$AZTEC_NODE_URL" \
+  || fail "AZTEC_NODE_URL carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted endpoint. See $SCRIPT_DIR/.env.example."
+ok "PUBLIC_L1_RPC and AZTEC_NODE_URL carry no embedded credentials"
 
 step "Preflight: checking L1 RPC chain id (must be Sepolia 11155111)..."
 if ! L1_CHAIN_ID=$(cast chain-id --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
@@ -852,6 +865,14 @@ stage_manifest_sync() {
 }
 MANIFEST
   ok "Written $MANIFEST_PATH"
+
+  step "Manifest: writing the public manifest for chain-view..."
+  PM_ENV_ID=testnet PM_KIND=live PM_LABEL="Aztec testnet + Sepolia" PM_CHAIN_ID=11155111 \
+    PM_L1_DIR="$L1_DIR" PM_L2_DIR="$L2_DIR" PM_SUFFIX=-testnet PM_OUT="$SCRIPT_DIR/public-manifest.json" \
+    PM_PUBLIC_L1_RPC="$PUBLIC_L1_RPC" PM_PUBLIC_AZTEC_NODE="$AZTEC_NODE_URL" PM_PUBLIC_CHAIN_SERVER= \
+    PM_EXPLORER_L1=https://sepolia.etherscan.io PM_EXPLORER_L2= \
+    PM_READ_L1_RPC="$TESTNET_L1_RPC_URL" PM_READ_AZTEC_NODE="$AZTEC_NODE_URL" \
+    bash "$ROOT_DIR/deployments/lib/public-manifest.sh"
 
   step "Syncing addresses into interfaces/apps/web/.env.testnet..."
   WEB_ENV="$WEB_DIR/.env.testnet"
