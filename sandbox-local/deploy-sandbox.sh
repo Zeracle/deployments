@@ -253,11 +253,14 @@ NETWORK_FUND=$(jq -r '.networkFund' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
-# Install mock Chainlink feeds when the chain has none. install-mock-feeds.sh
-# probes the LUSD/USD feed address for code (a forked anvil has the real feed;
-# an unforked one has nothing and every deposit would revert on the price
-# read), so this is correct whether anvil was started here or by hand.
-step "Checking Chainlink price feeds (installs mocks on an unforked anvil)..."
+# Install mock Chainlink feeds. install-mock-feeds.sh always installs on
+# chain id 31337, forked or not (T2/B-2): a forked anvil's real Chainlink
+# aggregators report a frozen `updatedAt` (fixed at the fork block), which
+# would go stale about an hour after the fork once ChainlinkPriceSource
+# forwards each feed's real `updatedAt`. MockPriceFeed reports a live
+# `block.timestamp` instead, so re-installing on a fork is required, not
+# just harmless — and cheap, since it's idempotent either way.
+step "Installing mock Chainlink price feeds on 31337..."
 L1_DIR="$L1_DIR" ETH_RPC_URL="$ETH_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
   bash "$SCRIPT_DIR/install-mock-feeds.sh"
 ok "Price feeds verified"

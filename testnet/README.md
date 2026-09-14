@@ -72,8 +72,9 @@ This re-runs preflight, prints a summary, and then asks for an interactive
 safety net before real funds move). After confirmation it runs, in order:
 
 1. **L1 (Sepolia):** core contracts (`make deploy-testnet-l1`) → mock
-   tokens (`make deploy-mocks-testnet`) → mock Chainlink price feeds
-   (`install-mock-feeds.sh`, RPC-parameterized) → the TokenPortal bridge
+   tokens (`make deploy-mocks-testnet`, which also deploys fresh
+   MockPriceFeeds on Sepolia — T2; `install-mock-feeds.sh` is 31337-only
+   and does not run here) → the TokenPortal bridge
    (`make deploy-bridge-testnet`, using the Inbox/Rollup addresses the
    preflight already fetched from the testnet node). Outputs land in
    `v1-l1/deployments/{local,tokens,bridge}-testnet.json` — the sandbox's
