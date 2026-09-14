@@ -35,7 +35,9 @@
 #                            claim-fees-l1.ts's own deployer-key fallback
 #                            chain is never reached.
 #   V1_L2_DIR              - path to the v1-l2 checkout. Every script runs
-#                            with it as cwd (`yarn --cwd`), so the default
+#                            with it as cwd (`yarn --cwd` for the package
+#                            scripts; `cd` + `npx tsx` for sweep and flush,
+#                            see v1l2_tsx below), so the default
 #                            deployment.json is $V1_L2_DIR/deployment.json and
 #                            the default L1 deployment files live in
 #                            $V1_L2_DIR/../v1-l1/deployments/.
@@ -150,6 +152,14 @@ step() { echo; echo "=== $* ==="; }
 record()      { SUMMARY+=("$1: $2"); }
 record_fail() { SUMMARY+=("$1: FAILED${2:+ ($2)}"); FAILS=$((FAILS + 1)); }
 
+# v1l2_tsx <script> [args...]: run a v1-l2 TypeScript script from V1_L2_DIR.
+# v1-l2 has no tsx dependency, so `yarn tsx …` fails with 'Command "tsx" not
+# found' before the script ever runs (T12 batch C, the first real keeper run).
+# Every v1-l2 package script runs through `npx tsx` instead (claim:fees,
+# keeper:*), so this does the same. The scripts resolve deployment.json
+# against their cwd, hence the cd. The caller's environment passes through.
+v1l2_tsx() { (cd "$V1_L2_DIR" && NODE_NO_WARNINGS=1 npx tsx "$@"); }
+
 # write_pending <hash>...: atomically replace the pending file's contents.
 write_pending() {
   local tmp="$PENDING_FLUSH_FILE.tmp"
@@ -159,7 +169,7 @@ write_pending() {
 
 # --- 1. sweep (operator mode: ZRCL_ADDRESS from env, sweep everything) ------
 step "sweep"
-if yarn --cwd "$V1_L2_DIR" tsx scripts/sweep-fees.ts --all; then
+if v1l2_tsx scripts/sweep-fees.ts --all; then
   record "sweep" "ok"
 else
   record_fail "sweep"
@@ -172,7 +182,7 @@ fi
 # exit code, not a pipeline's.
 step "flush"
 set +o pipefail
-FLUSH_OUTPUT="$(yarn --cwd "$V1_L2_DIR" tsx scripts/flush-fees.ts 2>&1)"
+FLUSH_OUTPUT="$(v1l2_tsx scripts/flush-fees.ts 2>&1)"
 FLUSH_STATUS=$?
 set -o pipefail
 echo "$FLUSH_OUTPUT"

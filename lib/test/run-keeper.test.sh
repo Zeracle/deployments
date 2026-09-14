@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TDD RED/GREEN coverage for lib/keeper/run-keeper.sh (D-b, Db-10 + the final
-# review fixes). Puts stub yarn/node binaries on PATH and drives run-keeper.sh
+# review fixes). Puts stub yarn/npx/node binaries on PATH and drives run-keeper.sh
 # through:
 #   - the step order (sweep -> flush -> relay -> convert -> cushion)
 #   - a missing KEEPER_L1_PRIVATE_KEY / ZRCL_ADDRESS exiting non-zero before
@@ -20,10 +20,12 @@ RUN_KEEPER="$HERE/../keeper/run-keeper.sh"
 STUB_BIN=$(mktemp -d)
 STUB_LOG=$(mktemp)
 STATE_ROOT=$(mktemp -d)
-export STUB_LOG # the stub yarn/node binaries below run as SEPARATE processes
+# A real directory: sweep and flush `cd` into V1_L2_DIR before running.
+FAKE_L2=$(mktemp -d)
+export STUB_LOG # the stub yarn/npx/node binaries below run as SEPARATE processes
                 # (found via PATH from inside run-keeper.sh) and need this
                 # in their own environment, not just this script's shell.
-trap 'rm -rf "$STUB_BIN" "$STUB_LOG" "$STATE_ROOT"' EXIT
+trap 'rm -rf "$STUB_BIN" "$STUB_LOG" "$STATE_ROOT" "$FAKE_L2"' EXIT
 
 # --- stub yarn: records "STEP=<name> ... ARGS=<argv>" for every invocation it
 # recognizes, and fakes each script's exit code / stdout via STUB_* env vars
@@ -34,19 +36,14 @@ cat > "$STUB_BIN/yarn" <<'STUB'
 set -uo pipefail
 LINE="yarn $*"
 case "$LINE" in
-  *"tsx scripts/sweep-fees.ts"*)
-    echo "STEP=sweep ARGS=$*" >> "$STUB_LOG"
-    exit "${STUB_SWEEP_EXIT:-0}"
-    ;;
-  *"tsx scripts/flush-fees.ts"*)
-    echo "STEP=flush ARGS=$*" >> "$STUB_LOG"
-    if [ -n "${STUB_FLUSH_TX:-}" ]; then
-      echo "FLUSH_TX=${STUB_FLUSH_TX}"
-      echo "FLUSH_BLOCK=42"
-    else
-      echo "nothing to flush"
-    fi
-    exit "${STUB_FLUSH_EXIT:-0}"
+  *" tsx "*)
+    # Real yarn: v1-l2 has no tsx dependency, so `yarn [--cwd …] tsx …` never
+    # runs the script — it fails with 'Command "tsx" not found' (T12 batch C,
+    # the first real run). Mirror that, so a regression back to `yarn tsx`
+    # fails this test the way it fails on a real checkout.
+    echo "STEP=yarn-tsx ARGS=$*" >> "$STUB_LOG"
+    echo 'error Command "tsx" not found. Did you mean "tsc"?' >&2
+    exit 1
     ;;
   *"claim:fees"*)
     echo "STEP=claim WAIT=${CLAIM_WITNESS_TIMEOUT_SECS:-unset} ARGS=$*" >> "$STUB_LOG"
@@ -67,6 +64,36 @@ case "$LINE" in
 esac
 STUB
 chmod +x "$STUB_BIN/yarn"
+
+# --- stub npx: sweep and flush run their v1-l2 scripts as `npx tsx …` from
+# V1_L2_DIR, the same runner every v1-l2 package script uses. Records the tool
+# and the cwd so Test 13 can assert both.
+cat > "$STUB_BIN/npx" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+LINE="npx $*"
+case "$LINE" in
+  *"tsx scripts/sweep-fees.ts"*)
+    echo "STEP=sweep TOOL=npx CWD=$PWD ARGS=$*" >> "$STUB_LOG"
+    exit "${STUB_SWEEP_EXIT:-0}"
+    ;;
+  *"tsx scripts/flush-fees.ts"*)
+    echo "STEP=flush TOOL=npx CWD=$PWD ARGS=$*" >> "$STUB_LOG"
+    if [ -n "${STUB_FLUSH_TX:-}" ]; then
+      echo "FLUSH_TX=${STUB_FLUSH_TX}"
+      echo "FLUSH_BLOCK=42"
+    else
+      echo "nothing to flush"
+    fi
+    exit "${STUB_FLUSH_EXIT:-0}"
+    ;;
+  *)
+    echo "run-keeper.test.sh: unrecognized stub npx invocation: $*" >&2
+    exit 99
+    ;;
+esac
+STUB
+chmod +x "$STUB_BIN/npx"
 
 # Stub node too (per the plan's test setup), even though the current
 # run-keeper.sh never shells out to node directly (Db-1: convert/cushion are
@@ -135,7 +162,7 @@ pending_has() {
 run_keeper() {
   : > "$STUB_LOG"
   set +e
-  OUTPUT=$(env PATH="$STUB_BIN:$PATH" V1_L2_DIR=/fake/v1-l2 ZRCL_ADDRESS=0xzrcl \
+  OUTPUT=$(env PATH="$STUB_BIN:$PATH" V1_L2_DIR="$FAKE_L2" ZRCL_ADDRESS=0xzrcl \
     KEEPER_L1_PRIVATE_KEY=0xkeeper KEEPER_STATE_DIR="$STATE_DIR" "$@" \
     bash "$RUN_KEEPER" 2>&1)
   STATUS=$?
@@ -153,7 +180,7 @@ summary_has() {
 : > "$STUB_LOG"
 new_state
 set +e
-OUTPUT=$(env -u KEEPER_L1_PRIVATE_KEY PATH="$STUB_BIN:$PATH" V1_L2_DIR=/fake/v1-l2 \
+OUTPUT=$(env -u KEEPER_L1_PRIVATE_KEY PATH="$STUB_BIN:$PATH" V1_L2_DIR="$FAKE_L2" \
   ZRCL_ADDRESS=0xzrcl KEEPER_STATE_DIR="$STATE_DIR" bash "$RUN_KEEPER" 2>&1)
 STATUS=$?
 set -e
@@ -168,7 +195,7 @@ esac
 : > "$STUB_LOG"
 new_state
 set +e
-OUTPUT=$(env -u ZRCL_ADDRESS PATH="$STUB_BIN:$PATH" V1_L2_DIR=/fake/v1-l2 \
+OUTPUT=$(env -u ZRCL_ADDRESS PATH="$STUB_BIN:$PATH" V1_L2_DIR="$FAKE_L2" \
   KEEPER_L1_PRIVATE_KEY=0xkeeper KEEPER_STATE_DIR="$STATE_DIR" bash "$RUN_KEEPER" 2>&1)
 STATUS=$?
 set -e
@@ -326,6 +353,24 @@ run_keeper STUB_FLUSH_TX=0xddd444 KEEPER_CLAIM_WAIT_SECS=7000
 case "$(claim_lines)" in
   *"WAIT=7000 "*) ok "claim wait: KEEPER_CLAIM_WAIT_SECS overrides the budget" ;;
   *) fail "claim wait: KEEPER_CLAIM_WAIT_SECS not honoured ($(claim_lines))" ;;
+esac
+
+# --- Test 13 (T12 batch C): sweep and flush run their v1-l2 scripts through
+# `npx tsx` FROM V1_L2_DIR. v1-l2 has no tsx dependency (every v1-l2 package
+# script uses `npx tsx`), so `yarn tsx` fails before the script runs, and the
+# scripts resolve deployment.json against their cwd.
+new_state
+run_keeper STUB_FLUSH_TX=0xeee555
+for S in sweep flush; do
+  L=$(while IFS= read -r line; do case "$line" in "STEP=$S "*) echo "$line" ;; esac; done < "$STUB_LOG")
+  case "$L" in
+    *"TOOL=npx CWD=$FAKE_L2 "*) ok "$S: runs via npx tsx from V1_L2_DIR" ;;
+    *) fail "$S: not run via npx tsx from V1_L2_DIR (got: ${L:-nothing})" ;;
+  esac
+done
+case "$(while IFS= read -r line; do case "$line" in "STEP=sweep "*) echo "$line" ;; esac; done < "$STUB_LOG")" in
+  *"tsx scripts/sweep-fees.ts --all"*) ok "sweep: still operator mode, --all" ;;
+  *) fail "sweep: --all not passed" ;;
 esac
 
 echo
