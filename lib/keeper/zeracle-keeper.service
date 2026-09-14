@@ -1,0 +1,50 @@
+# D-b keeper systemd unit — TEMPLATE ONLY. Not installed or started by any
+# script in this repo; the operator copies this onto the box themselves.
+# Mirrors the pattern used by devops/production/ec2/files/ops/systemd/
+# {anvil,chain-server,block-producer}.service.
+#
+# The keeper runs on its OWN low-value L1 key, outside chain-server — see
+# lib/keeper/run-keeper.sh's header for the full env contract, including the
+# complete testnet env block.
+#
+# Before installing, the operator must:
+#   - Pick a user. This template has no User=, so as written it runs as ROOT.
+#     Create a dedicated unprivileged user (e.g. `zeracle-keeper`) that can
+#     read the v1-l2/v1-l1 checkouts and the custodian key file, and
+#     uncomment User=/Group= below.
+#   - Put yarn AND npx on the unit's PATH. systemd does not use a login
+#     shell's PATH, so both `yarn` and `npx` (and the node they run) must be
+#     reachable from the Environment=PATH= line below. run-keeper.sh's sweep
+#     and flush steps run through `npx tsx` directly (v1-l2 has no `tsx`
+#     dependency, so `yarn tsx` fails there) -- npx ships alongside npm/node,
+#     but it must ALSO resolve on this PATH, same as yarn. Adjust the line
+#     below to where node/yarn/npx are installed (an nvm install is NOT on it
+#     by default). A PATH set in the EnvironmentFile overrides this line.
+#   - Fill in /etc/zeracle/keeper.env (mode 0600, owned by that user). It must
+#     set at least KEEPER_L1_PRIVATE_KEY, V1_L2_DIR and ZRCL_ADDRESS; on
+#     testnet also ETH_CHAIN_ID=11155111, L1_RPC_URL, AZTEC_RPC_HOST and
+#     FEE_CUSTODIAN_ACCOUNT_FILE. V1_L2_DIR must be set there: WorkingDirectory
+#     does not supply it. The fee custodian needs no on-chain deployment (it
+#     is an initializerless account).
+#
+# State: run-keeper.sh keeps un-relayed flush tx hashes in
+# $KEEPER_STATE_DIR/pending-flush (default /var/lib/zeracle-keeper) and
+# retries them on every run. StateDirectory= below has systemd create
+# /var/lib/zeracle-keeper owned by User=. Message proofs are served for
+# roughly 2 h only, so with a weekly timer the in-run claim wait
+# (KEEPER_CLAIM_WAIT_SECS, default 5400) is what covers slow epoch proving.
+# Type=oneshot has no start timeout by default, so a long wait is not killed.
+[Unit]
+Description=Zeracle fee keeper (D-b): sweep, flush, relay, convert, cushion
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# User=zeracle-keeper
+# Group=zeracle-keeper
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/zeracle/keeper.env
+StateDirectory=zeracle-keeper
+WorkingDirectory=/opt/zeracle
+ExecStart=/opt/zeracle/deployments/lib/keeper/run-keeper.sh

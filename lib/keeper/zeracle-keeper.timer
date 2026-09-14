@@ -1,0 +1,13 @@
+# D-b keeper systemd timer — TEMPLATE ONLY. Not installed or started by any
+# script in this repo; see zeracle-keeper.service in this same directory.
+[Unit]
+Description=Run the Zeracle fee keeper on a schedule (D-b)
+
+[Timer]
+# D-c argues for a minimum-batch interval; weekly is the runbook's stated
+# floor recommendation (owner decision #5, testnet-readiness-review.md §10).
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
