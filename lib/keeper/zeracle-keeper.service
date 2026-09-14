@@ -12,11 +12,14 @@
 #     Create a dedicated unprivileged user (e.g. `zeracle-keeper`) that can
 #     read the v1-l2/v1-l1 checkouts and the custodian key file, and
 #     uncomment User=/Group= below.
-#   - Put yarn on the unit's PATH. systemd does not use a login shell's PATH,
-#     so `yarn` (and the node it runs) must be reachable from the
-#     Environment=PATH= line below. Adjust it to where node/yarn are installed
-#     (an nvm install is NOT on it by default). A PATH set in the
-#     EnvironmentFile overrides this line.
+#   - Put yarn AND npx on the unit's PATH. systemd does not use a login
+#     shell's PATH, so both `yarn` and `npx` (and the node they run) must be
+#     reachable from the Environment=PATH= line below. run-keeper.sh's sweep
+#     and flush steps run through `npx tsx` directly (v1-l2 has no `tsx`
+#     dependency, so `yarn tsx` fails there) -- npx ships alongside npm/node,
+#     but it must ALSO resolve on this PATH, same as yarn. Adjust the line
+#     below to where node/yarn/npx are installed (an nvm install is NOT on it
+#     by default). A PATH set in the EnvironmentFile overrides this line.
 #   - Fill in /etc/zeracle/keeper.env (mode 0600, owned by that user). It must
 #     set at least KEEPER_L1_PRIVATE_KEY, V1_L2_DIR and ZRCL_ADDRESS; on
 #     testnet also ETH_CHAIN_ID=11155111, L1_RPC_URL, AZTEC_RPC_HOST and

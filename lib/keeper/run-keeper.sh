@@ -41,6 +41,12 @@
 #                            deployment.json is $V1_L2_DIR/deployment.json and
 #                            the default L1 deployment files live in
 #                            $V1_L2_DIR/../v1-l1/deployments/.
+#                            Under the zeracle-keeper.service template, `npx`
+#                            must ALSO resolve on the unit's Environment=PATH=
+#                            line, same as `yarn` -- sweep and flush now run
+#                            through `npx tsx` (v1l2_tsx below), not `yarn
+#                            tsx`, since v1-l2 has no `tsx` dependency of its
+#                            own.
 #   ZRCL_ADDRESS           - the deployed ZeracleToken. Required: without it
 #                            sweep-fees.ts and flush-fees.ts silently fall
 #                            into FIXTURE mode (test/fixtures/*).
