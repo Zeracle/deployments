@@ -507,6 +507,12 @@ stage_l1_deploy() {
 # (Task 4) tells deploy.ts's isTestnetL1Mode() branch where to persist/reload
 # the real testnet deployer keypair (sandbox has no such file — it uses the
 # canonical pre-deployed test account instead, unaffected by this var).
+# FEE_CUSTODIAN_ACCOUNT_FILE (D-b/Db-4) is the same idea for the fee
+# custodian: deploy.ts now REQUIRES it in testnet mode (a separate key file
+# from DEPLOYER_ACCOUNT_FILE, so a keeper that sweeps as the custodian never
+# needs the deployer's L2 secret) and refuses to run without it — set the
+# same way, right below, so this stage doesn't regress the moment deploy.ts
+# starts requiring it.
 #
 # After the L2 contracts land, wires the freshly deployed L2 TokenBridge into
 # the Stage 1 L1 TokenPortal via `make wire-bridge-testnet` (v1-l1/Makefile,
@@ -525,6 +531,13 @@ stage_l2_deploy() {
   step "L2: deploying Aztec testnet contracts + fee-juice bootstrap..."
   DEPLOYER_ACCOUNT_FILE="$SCRIPT_DIR/deployer-account.json"
   export DEPLOYER_ACCOUNT_FILE
+  # D-b/Db-4: same treatment as DEPLOYER_ACCOUNT_FILE above — set + exported
+  # (not passed inline to yarn deploy:clean, mirroring exactly how
+  # DEPLOYER_ACCOUNT_FILE itself reaches deploy.ts) rather than read from
+  # .env, since it names a path this script computes, not a value the
+  # operator supplies.
+  FEE_CUSTODIAN_ACCOUNT_FILE="$SCRIPT_DIR/fee-custodian-account.json"
+  export FEE_CUSTODIAN_ACCOUNT_FILE
   # Compliance (attestor + zkPassport + bridge exit enforcement) is not part of
   # the testnet release (owner decision 2026-09-13). ZERACLE_COMPLIANCE=off
   # deploys no Compliance contract and gives the bridge AztecAddress.ZERO (exit
@@ -553,6 +566,7 @@ stage_l2_deploy() {
   ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (deployed but UNFUNDED — top up via the chain-view admin panel before any sponsored tx will go through)"
   ok "Deployer:        $(jq -r '.deployer' deployment.json)"
   ok "Deployer keys:   $DEPLOYER_ACCOUNT_FILE (BACK THIS UP — never commit/ship it)"
+  ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; deployed:false until deploy-fee-custodian.ts runs)"
 
   step "L2: wiring L1 TokenPortal to the freshly deployed L2 TokenBridge..."
   L2_BRIDGE_ADDRESS=$(jq -r '.contracts.tokenBridge' deployment.json)
