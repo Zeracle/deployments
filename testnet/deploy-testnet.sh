@@ -11,7 +11,8 @@
 #
 # Stages:
 #   0. Preflight — tools, env, L1 RPC chain id, deployer balance, Aztec node
-#                  reachability + version match. (this file, implemented)
+#                  reachability + version match, deployer L1 fee-asset
+#                  (fee-juice token) balance. (this file, implemented)
 #   1. L1 deploy — Sepolia contracts + mock tokens/feeds + bridge. (stub —
 #                  Tasks 3-4 of the testnet-deploy-pipeline plan fill this in)
 #   2. L2 deploy — Aztec testnet contracts + fee-juice bootstrap. (stub)
@@ -286,6 +287,7 @@ try {
     rollupAddress: info.l1ContractAddresses.rollupAddress.toString(),
     registryAddress: info.l1ContractAddresses.registryAddress.toString(),
     feeJuicePortalAddress: info.l1ContractAddresses.feeJuicePortalAddress.toString(),
+    feeJuiceAddress: info.l1ContractAddresses.feeJuiceAddress.toString(),
   }));
 } catch (err) {
   console.error(err && err.message ? err.message : String(err));
@@ -330,6 +332,34 @@ ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
 ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
 ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
 
+# T5-R9: Stage 2 (v1-l2/scripts/deploy.ts) bridges the deployer's OWN L1
+# fee-asset balance non-mint — a real network has no faucet. Stage 2 only runs
+# after every Stage 1 Sepolia tx has spent gas, and the pipeline has no resume
+# flag for Stage 1, so a short balance must be caught HERE, before anything
+# broadcasts. The token is the L1 fee-juice ERC20 the node itself reports (the
+# one L1FeeJuicePortalManager bridges). The signer matches: stage_l2_deploy
+# passes L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY". The amount matches:
+# L1_FEE_ASSET_BRIDGE_AMOUNT is exported from .env (set -a), and empty or unset
+# means 1e18 here exactly as in resolveFeeAssetBridgeMode(). deploy.ts repeats
+# this check right before its bridge as a second guard.
+step "Preflight: checking deployer L1 fee-asset balance (fee-juice token)..."
+L1_FEE_JUICE_ADDRESS=$(echo "$NODE_INFO_JSON" | jq -r '.feeJuiceAddress')
+[[ "$L1_FEE_JUICE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "Aztec node at $AZTEC_NODE_URL did not report a valid L1 fee-juice token address (got '$L1_FEE_JUICE_ADDRESS')."
+FEE_ASSET_REQUIRED="${L1_FEE_ASSET_BRIDGE_AMOUNT:-1000000000000000000}"
+[[ "$FEE_ASSET_REQUIRED" =~ ^[0-9]+$ ]] || fail "L1_FEE_ASSET_BRIDGE_AMOUNT ($FEE_ASSET_REQUIRED) must be a base-10 integer (base units of the fee-juice token). See $SCRIPT_DIR/.env.example."
+if ! FEE_ASSET_BALANCE_OUT=$(cast call "$L1_FEE_JUICE_ADDRESS" 'balanceOf(address)(uint256)' "$DEPLOYER_ADDRESS" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+  fail "Could not read the fee-juice token balance (token $L1_FEE_JUICE_ADDRESS, deployer $DEPLOYER_ADDRESS) from $TESTNET_L1_RPC_URL: $FEE_ASSET_BALANCE_OUT"
+fi
+# cast prints large uint256 values as "<decimal> [<scientific>]"; keep the decimal.
+FEE_ASSET_BALANCE="${FEE_ASSET_BALANCE_OUT%% *}"
+[[ "$FEE_ASSET_BALANCE" =~ ^[0-9]+$ ]] || fail "Unexpected balanceOf output from fee-juice token $L1_FEE_JUICE_ADDRESS: $FEE_ASSET_BALANCE_OUT"
+# Exact big-integer compare: bash arithmetic overflows past 2^63 and awk rounds.
+if ! python3 -c 'import sys; sys.exit(0 if int(sys.argv[1]) >= int(sys.argv[2]) else 1)' "$FEE_ASSET_BALANCE" "$FEE_ASSET_REQUIRED"; then
+  fail "Fee-asset shortfall: deployer $DEPLOYER_ADDRESS holds $FEE_ASSET_BALANCE base units of the L1 fee-juice token $L1_FEE_JUICE_ADDRESS, but the L2 deploy bridges $FEE_ASSET_REQUIRED (L1_FEE_ASSET_BRIDGE_AMOUNT, default 1e18). There is no faucet on a real network: fund the deployer with that token and retry. Nothing has been broadcast."
+fi
+ok "Fee-juice token:   $L1_FEE_JUICE_ADDRESS"
+ok "Fee-asset balance: $FEE_ASSET_BALANCE base units (>= $FEE_ASSET_REQUIRED required)"
+
 step "Preflight: checking prebuilt L2 artifacts + web env template..."
 # Hoisted from stage_l2_deploy/stage_manifest_sync (same fail messages) so a
 # missing prebuilt artifact or template file is caught here, before the
@@ -369,6 +399,8 @@ cat <<SUMMARY
   L1 Rollup address:            $L1_ROLLUP_ADDRESS
   L1 Registry address:          $L1_REGISTRY_ADDRESS
   L1 FeeJuicePortal address:    $L1_FEE_JUICE_PORTAL_ADDRESS
+  L1 fee-juice token:           $L1_FEE_JUICE_ADDRESS
+  Deployer fee-asset balance:   $FEE_ASSET_BALANCE base units (L2 deploy bridges $FEE_ASSET_REQUIRED)
   ETHERSCAN_API_KEY set:        $([ -n "${ETHERSCAN_API_KEY:-}" ] && echo "yes (--verify will run on L1 targets)" || echo "no (contracts deploy unverified)")
 
 SUMMARY
