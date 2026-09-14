@@ -1,0 +1,17 @@
+# D-b keeper systemd unit — TEMPLATE ONLY. Not installed or started by any
+# script in this repo; the operator copies this onto the box themselves and
+# fills in KEEPER_L1_PRIVATE_KEY in /etc/zeracle/keeper.env (mode 0600, owned
+# by whichever user WorkingDirectory/ExecStart run as). Mirrors the pattern
+# used by devops/production/ec2/files/ops/systemd/{anvil,chain-server,
+# block-producer}.service.
+#
+# The keeper runs on its OWN low-value L1 key, outside chain-server — see
+# lib/keeper/run-keeper.sh's header for the full env var list.
+[Unit]
+Description=Zeracle fee keeper (D-b): sweep, flush, relay, convert, cushion
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/zeracle/keeper.env
+WorkingDirectory=/opt/zeracle
+ExecStart=/opt/zeracle/deployments/lib/keeper/run-keeper.sh
