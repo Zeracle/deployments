@@ -8,29 +8,96 @@
 # itself is invoked directly and is never gated on any network flag.
 #
 # Sequence (Db-10): sweep (operator mode, everything) -> flush (parses
-# FLUSH_TX) -> claim+retire relay (skipped when nothing was flushed) ->
-# convert -> cushion. Every step runs regardless of an earlier step's
-# outcome — the summary at the end is what tells the operator (or the
-# systemd unit's exit code) whether anything genuinely failed.
+# FLUSH_TX) -> relay every pending flush tx (claim+retire) -> convert ->
+# cushion. Every step runs regardless of an earlier step's outcome — the
+# summary at the end is what tells the operator (or the systemd unit's exit
+# code) whether anything genuinely failed.
+#
+# Pending relays (final review Important 2): a flush's L2->L1 messages can
+# only be relayed once its epoch is proven on L1, which on testnet often
+# takes longer than one claim wait. So every FLUSH_TX is appended to
+# $KEEPER_STATE_DIR/pending-flush BEFORE the relay runs, and every run
+# retries each pending hash with `claim:fees --tx <hash>`, removing a hash
+# only once its claim exits 0. A failed claim keeps the hash and fails the
+# relay step. The node serves message proofs for roughly 2 h only, so the
+# in-run wait (KEEPER_CLAIM_WAIT_SECS) is what covers slow proving; the
+# cross-run retry only helps if the next run comes inside that window.
 #
 # Env (required):
 #   KEEPER_L1_PRIVATE_KEY  - a SEPARATE, low-value L1 key. NEVER the
-#                            deployer key (DEPLOYER_PRIVATE_KEY /
-#                            L1_DEPLOYER_PRIVATE_KEY). There is no fallback
-#                            to any deployer key anywhere in this script —
+#                            deployer key: this script refuses to start if it
+#                            equals DEPLOYER_PRIVATE_KEY or
+#                            L1_DEPLOYER_PRIVATE_KEY (when either is set;
+#                            compared without echoing either value). There is
+#                            no fallback to any deployer key anywhere —
 #                            L1_CLAIMER_PRIVATE_KEY is set from this var
-#                            explicitly, only for the claim step, so
+#                            explicitly, only for the relay, so
 #                            claim-fees-l1.ts's own deployer-key fallback
 #                            chain is never reached.
-#   V1_L2_DIR              - path to the v1-l2 checkout that has sweep-fees.ts,
-#                            flush-fees.ts, claim-fees-l1.ts, and the
-#                            keeper:convert / keeper:cushion package scripts.
+#   V1_L2_DIR              - path to the v1-l2 checkout. Every script runs
+#                            with it as cwd (`yarn --cwd`), so the default
+#                            deployment.json is $V1_L2_DIR/deployment.json and
+#                            the default L1 deployment files live in
+#                            $V1_L2_DIR/../v1-l1/deployments/.
+#   ZRCL_ADDRESS           - the deployed ZeracleToken. Required: without it
+#                            sweep-fees.ts and flush-fees.ts silently fall
+#                            into FIXTURE mode (test/fixtures/*).
 #
-# Env (passed through, unmodified, to the v1-l2 scripts — see each script's
-# own header for the full list and defaults):
-#   AZTEC_RPC_HOST, L1_RPC_URL (or ETH_RPC_URL), ZRCL_ADDRESS,
-#   FEE_DISTRIBUTION_ADDRESS, L1_TOKEN_PORTAL, LIQUIDITY_POOL_ADDRESS,
-#   FEE_CUSTODIAN_ACCOUNT_FILE (testnet only; unset = sandbox test account).
+# Env (optional, keeper):
+#   KEEPER_STATE_DIR       - default /var/lib/zeracle-keeper (created if
+#                            missing; the service template's StateDirectory=
+#                            creates it too). Holds `pending-flush`, one L2 flush
+#                            tx hash per line.
+#   KEEPER_CLAIM_WAIT_SECS - default 5400 (90 min, inside the ~2 h proof
+#                            window). Passed to claim-fees-l1.ts as
+#                            CLAIM_WITNESS_TIMEOUT_SECS, per pending hash.
+#
+# Env contract (final review Important 3), passed through unmodified to the
+# v1-l2 scripts — see each script's header for the full defaults:
+#   L2 side (sweep, flush, relay):
+#     AZTEC_RPC_HOST              - Aztec node RPC (default http://localhost:8080)
+#     FEE_DISTRIBUTION_ADDRESS    - default: deployment.json contracts.feeDistribution
+#     FEE_CUSTODIAN_ACCOUNT_FILE  - testnet: a copy of the custodian key file
+#                                   deploy.ts wrote (deployments/testnet/
+#                                   fee-custodian-account.json); deployment.json
+#                                   must record the matching `feeCustodian`.
+#                                   Unset on the sandbox (genesis test account
+#                                   [1]). The custodian needs NO on-chain
+#                                   deployment: it is an initializerless
+#                                   account, so sweep sends from it directly
+#                                   and pays through the sponsored FPC.
+#     L1_TOKEN_PORTAL             - relay; default deployment.json l1.tokenPortal
+#   L1 side (relay, convert, cushion):
+#     L1_RPC_URL (or ETH_RPC_URL) - default http://localhost:8545
+#     ETH_CHAIN_ID                - set 11155111 on testnet. claim-fees-l1.ts
+#                                   signs for foundry (31337) without it;
+#                                   convert/cushion build their chain from the
+#                                   RPC's own chain id and refuse an ETH_CHAIN_ID
+#                                   that disagrees with it.
+#     L1_LIQUIDITY_POOL           - convert + cushion; default `liquidityPoolProxy`
+#                                   from ../v1-l1/deployments/local.json (31337)
+#                                   or local-testnet.json (11155111), chosen by
+#                                   the RPC's chain id
+#     L1_MOCK_DEX_AGGREGATOR      - convert; default `mockDexAggregator` from the
+#                                   same file
+#     L1_TREASURY, L1_COLLATERAL_RESERVE, L1_NETWORK_FUND
+#                                 - convert; default deployment.json l1.*
+#   No fee-token, quoter or deposit-adapter address is configured: convert
+#   reads FeeFund.token() and MockDexAggregator.quoter()/pool() on-chain.
+#
+# Testnet env block (placeholders; fill in from v1-l2/deployment.json and
+# v1-l1/deployments/local-testnet.json):
+#   KEEPER_L1_PRIVATE_KEY=<separate, funded, low-value Sepolia key>
+#   V1_L2_DIR=/opt/zeracle/v1-l2
+#   ZRCL_ADDRESS=<deployment.json contracts.zeracleToken>
+#   AZTEC_RPC_HOST=<Aztec testnet node URL>
+#   L1_RPC_URL=<Sepolia RPC URL>
+#   ETH_CHAIN_ID=11155111
+#   FEE_CUSTODIAN_ACCOUNT_FILE=<path to the fee-custodian-account.json copy>
+#   KEEPER_STATE_DIR=/var/lib/zeracle-keeper
+#   KEEPER_CLAIM_WAIT_SECS=5400
+# The L1_* address overrides are optional there when both deployment files
+# sit where the defaults expect them.
 #
 # Sandbox example keeper key (anvil #4 — never #0, the sequencer's key, and
 # never #1/#2/#3, the deployer/guardian/governance keys):
@@ -46,20 +113,56 @@ if [ -z "${KEEPER_L1_PRIVATE_KEY:-}" ]; then
 fi
 
 V1_L2_DIR="${V1_L2_DIR:?V1_L2_DIR is required (path to the v1-l2 checkout)}"
+: "${ZRCL_ADDRESS:?ZRCL_ADDRESS is required (the deployed ZeracleToken) — without it sweep-fees.ts and flush-fees.ts silently run in FIXTURE mode. Aborting before any step runs.}"
+
+# Final review Minor 8: refuse to run on a deployer key. Keys are compared
+# with any 0x prefix and case normalised away, and never printed.
+normalize_key() {
+  local k="${1#0x}"
+  k="${k#0X}"
+  printf '%s' "${k,,}"
+}
+KEEPER_KEY_NORM=$(normalize_key "$KEEPER_L1_PRIVATE_KEY")
+for DEPLOYER_KEY_VAR in DEPLOYER_PRIVATE_KEY L1_DEPLOYER_PRIVATE_KEY; do
+  if [ -n "${!DEPLOYER_KEY_VAR:-}" ] &&
+     [ "$(normalize_key "${!DEPLOYER_KEY_VAR}")" = "$KEEPER_KEY_NORM" ]; then
+    echo "KEEPER_L1_PRIVATE_KEY is the same key as $DEPLOYER_KEY_VAR. The keeper must run on its" >&2
+    echo "own low-value key, never a deployer key. Aborting before any step runs." >&2
+    exit 1
+  fi
+done
+unset KEEPER_KEY_NORM DEPLOYER_KEY_VAR
+
+KEEPER_STATE_DIR="${KEEPER_STATE_DIR:-/var/lib/zeracle-keeper}"
+KEEPER_CLAIM_WAIT_SECS="${KEEPER_CLAIM_WAIT_SECS:-5400}"
+PENDING_FLUSH_FILE="$KEEPER_STATE_DIR/pending-flush"
+if ! mkdir -p "$KEEPER_STATE_DIR"; then
+  echo "Cannot create KEEPER_STATE_DIR=$KEEPER_STATE_DIR (pending flush relays live there)." >&2
+  echo "Set KEEPER_STATE_DIR to a writable directory. Aborting before any step runs." >&2
+  exit 1
+fi
 
 FAILS=0
 SUMMARY=()
 
 step() { echo; echo "=== $* ==="; }
-record_ok()   { SUMMARY+=("$1: ok"); }
-record_fail() { SUMMARY+=("$1: FAILED"); FAILS=$((FAILS + 1)); }
+# Summary lines are always "<step>: <status>".
+record()      { SUMMARY+=("$1: $2"); }
+record_fail() { SUMMARY+=("$1: FAILED${2:+ ($2)}"); FAILS=$((FAILS + 1)); }
+
+# write_pending <hash>...: atomically replace the pending file's contents.
+write_pending() {
+  local tmp="$PENDING_FLUSH_FILE.tmp"
+  if [ "$#" -eq 0 ]; then : > "$tmp"; else printf '%s\n' "$@" > "$tmp"; fi
+  mv -f "$tmp" "$PENDING_FLUSH_FILE"
+}
 
 # --- 1. sweep (operator mode: ZRCL_ADDRESS from env, sweep everything) ------
-step "sweep-fees"
+step "sweep"
 if yarn --cwd "$V1_L2_DIR" tsx scripts/sweep-fees.ts --all; then
-  record_ok "sweep-fees"
+  record "sweep" "ok"
 else
-  record_fail "sweep-fees"
+  record_fail "sweep"
 fi
 
 # --- 2. flush ----------------------------------------------------------------
@@ -67,7 +170,7 @@ fi
 # the operator/journal still sees the full output. pipefail is suspended
 # around the capture itself: we want FLUSH_STATUS to be flush-fees.ts's own
 # exit code, not a pipeline's.
-step "flush-fees"
+step "flush"
 set +o pipefail
 FLUSH_OUTPUT="$(yarn --cwd "$V1_L2_DIR" tsx scripts/flush-fees.ts 2>&1)"
 FLUSH_STATUS=$?
@@ -82,40 +185,76 @@ while IFS= read -r line; do
 done <<< "$FLUSH_OUTPUT"
 
 if [ "$FLUSH_STATUS" -eq 0 ]; then
-  record_ok "flush-fees"
+  record "flush" "ok"
 else
-  record_fail "flush-fees"
+  record_fail "flush"
 fi
 
-# --- 3. claim + retire relay --------------------------------------------------
-# Db-9: pass the flush tx via claim-fees-l1.ts's real --tx flag (its default
-# is "scan only the latest L2 block", which would miss a flush that isn't in
-# it). L1_CLAIMER_PRIVATE_KEY is set ONLY for this step, ONLY from
+# Every pending hash, oldest first; this run's FLUSH_TX is appended (once)
+# and persisted BEFORE the relay, so a crash mid-claim still leaves it pending.
+PENDING=()
+if [ -f "$PENDING_FLUSH_FILE" ]; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && PENDING+=("$line")
+  done < "$PENDING_FLUSH_FILE"
+fi
+if [ -n "$FLUSH_TX" ]; then
+  ALREADY_PENDING=0
+  for hash in ${PENDING[@]+"${PENDING[@]}"}; do
+    [ "$hash" = "$FLUSH_TX" ] && ALREADY_PENDING=1
+  done
+  [ "$ALREADY_PENDING" -eq 0 ] && PENDING+=("$FLUSH_TX")
+  write_pending "${PENDING[@]}"
+fi
+
+# --- 3. relay: claim + retire every pending flush tx --------------------------
+# Db-9: each hash goes through claim-fees-l1.ts's real --tx flag (its default
+# is "scan only the latest L2 block", which would miss an earlier flush).
+# L1_CLAIMER_PRIVATE_KEY is set ONLY for this step, ONLY from
 # KEEPER_L1_PRIVATE_KEY — claim-fees-l1.ts's own fallback chain
 # (L1_CLAIMER_PRIVATE_KEY -> L1_DEPLOYER_PRIVATE_KEY -> DEPLOYER_PRIVATE_KEY)
 # stays as-is, but setting it explicitly here means the keeper never falls
 # through to a deployer key.
-step "claim + retire relay"
-if [ -n "$FLUSH_TX" ]; then
-  if L1_CLAIMER_PRIVATE_KEY="$KEEPER_L1_PRIVATE_KEY" \
-      yarn --cwd "$V1_L2_DIR" claim:fees --tx "$FLUSH_TX"; then
-    record_ok "claim + retire relay"
+step "relay (claim + retire)"
+if [ "${#PENDING[@]}" -eq 0 ]; then
+  if [ "$FLUSH_STATUS" -ne 0 ]; then
+    echo "flush failed and nothing is pending -- skipping claim:fees."
+    record "relay" "skipped (flush failed)"
   else
-    record_fail "claim + retire relay"
+    echo "nothing flushed and nothing pending -- nothing to relay."
+    record "relay" "ok (idle: nothing to relay)"
   fi
 else
-  echo "flush produced no FLUSH_TX -- nothing to relay, skipping claim:fees."
-  record_ok "claim + retire relay (skipped: nothing to relay)"
+  STILL_PENDING=()
+  RELAYED=0
+  for hash in "${PENDING[@]}"; do
+    echo "relaying flush tx $hash (claim wait up to ${KEEPER_CLAIM_WAIT_SECS}s)..."
+    if L1_CLAIMER_PRIVATE_KEY="$KEEPER_L1_PRIVATE_KEY" \
+        CLAIM_WITNESS_TIMEOUT_SECS="$KEEPER_CLAIM_WAIT_SECS" \
+        yarn --cwd "$V1_L2_DIR" claim:fees --tx "$hash"; then
+      RELAYED=$((RELAYED + 1))
+    else
+      STILL_PENDING+=("$hash")
+    fi
+  done
+  write_pending ${STILL_PENDING[@]+"${STILL_PENDING[@]}"}
+  if [ "${#STILL_PENDING[@]}" -gt 0 ]; then
+    record_fail "relay" "${#STILL_PENDING[@]} of ${#PENDING[@]} still pending in $PENDING_FLUSH_FILE, retried next run"
+  elif [ "$FLUSH_STATUS" -ne 0 ]; then
+    record "relay" "ok ($RELAYED relayed; flush failed)"
+  else
+    record "relay" "ok ($RELAYED relayed)"
+  fi
 fi
 
 # --- 4. convert ----------------------------------------------------------------
-# convert-fees.ts (keeper:convert) resolves L1 addresses/RPC the same way
-# claim-fees-l1.ts does (env first, then deployment files) and requires
-# KEEPER_L1_PRIVATE_KEY itself — already in this script's environment, so it
-# is passed through unmodified rather than renamed.
+# convert-fees.ts (keeper:convert) takes its chain and deployment file from
+# the RPC's chain id and requires KEEPER_L1_PRIVATE_KEY itself — already in
+# this script's environment, so it is passed through unmodified rather than
+# renamed.
 step "convert"
 if yarn --cwd "$V1_L2_DIR" keeper:convert; then
-  record_ok "convert"
+  record "convert" "ok"
 else
   record_fail "convert"
 fi
@@ -123,7 +262,7 @@ fi
 # --- 5. cushion ----------------------------------------------------------------
 step "cushion"
 if yarn --cwd "$V1_L2_DIR" keeper:cushion; then
-  record_ok "cushion"
+  record "cushion" "ok"
 else
   record_fail "cushion"
 fi
