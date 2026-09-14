@@ -38,16 +38,22 @@ set -euo pipefail
 
 RPC="${ETH_RPC_URL:-http://localhost:8545}"
 KEY="${DEPLOYER_PRIVATE_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
-L1_DIR="${L1_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../v1-l1" && pwd)}"
 
 command -v cast >/dev/null 2>&1 || { echo "install-mock-feeds: cast not found on PATH" >&2; exit 1; }
 command -v forge >/dev/null 2>&1 || { echo "install-mock-feeds: forge not found on PATH" >&2; exit 1; }
 
 CHAIN_ID=$(cast chain-id --rpc-url "$RPC")
 if [ "$CHAIN_ID" != "31337" ]; then
-  echo "install-mock-feeds: refusing — connected chain id is $CHAIN_ID, not 31337 (local anvil). This script installs bytecode via anvil_setCode, an anvil-only debug RPC method a real chain (e.g. Sepolia, 11155111) does not expose. See T2 (deployments/../temp/versions/260913/testnet-readiness-review.md) for the Sepolia-native feed strategy." >&2
+  echo "install-mock-feeds: refusing — connected chain id is $CHAIN_ID, not 31337 (local anvil). This script installs bytecode via anvil_setCode, an anvil-only debug RPC method a real chain (e.g. Sepolia, 11155111) does not expose. Start anvil with \`--chain-id 31337\` (a hand-started \`anvil --fork-url ...\` without it reports chain id 1). See T2 (deployments/../temp/versions/260913/testnet-readiness-review.md) for the Sepolia-native feed strategy." >&2
   exit 1
 fi
+
+# Resolved only after the chain-id guard above: the sibling-repo layout this
+# default assumes doesn't hold in every checkout (e.g. a deployments-only
+# worktree), and callers that only need the guard to run — such as the guard
+# test — must never fail before the guard has a chance to refuse. Set L1_DIR
+# to override.
+L1_DIR="${L1_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../v1-l1" && pwd)}"
 
 # Chainlink USD feeds are all 8-decimal. Prices chosen to match the frontend's
 # sandbox fallback table (interfaces/apps/web/src/services/oracle/priceOracle.ts)
