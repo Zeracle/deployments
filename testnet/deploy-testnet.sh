@@ -566,7 +566,7 @@ stage_l2_deploy() {
   ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (deployed but UNFUNDED — top up via the chain-view admin panel before any sponsored tx will go through)"
   ok "Deployer:        $(jq -r '.deployer' deployment.json)"
   ok "Deployer keys:   $DEPLOYER_ACCOUNT_FILE (BACK THIS UP — never commit/ship it)"
-  ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; deployed:false until deploy-fee-custodian.ts runs)"
+  ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; no on-chain deployment needed: initializerless, sweep pays via the sponsored FPC)"
 
   step "L2: wiring L1 TokenPortal to the freshly deployed L2 TokenBridge..."
   L2_BRIDGE_ADDRESS=$(jq -r '.contracts.tokenBridge' deployment.json)
