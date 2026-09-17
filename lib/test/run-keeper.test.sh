@@ -18,6 +18,11 @@
 #   - ZER-13: a pending hash past the ~2 h proof window being EXPIRED and
 #     dropped instead of retried (and re-FAILED) forever, while a still-fresh
 #     hash keeps failing loudly and keeps its ORIGINAL timestamp
+#   - ZER-13 (review): a corrupt pending line (octal-looking, overflowing,
+#     future-stamped, undateable) expiring cleanly instead of aborting the
+#     relay step; the lock being held for the WHOLE run and not leaking into
+#     children; and the claim wait being clamped to the time actually left in
+#     the proof window
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -51,7 +56,19 @@ case "$LINE" in
     exit 1
     ;;
   *"claim:fees"*)
-    echo "STEP=claim WAIT=${CLAIM_WITNESS_TIMEOUT_SECS:-unset} ARGS=$*" >> "$STUB_LOG"
+    # ZER-13: two things only a CHILD of the keeper can observe.
+    # LOCK=  does the keeper still hold its state-dir lock while the relay is
+    #        running? (A keeper that took the lock and released it immediately
+    #        would pass Test 14 just as happily.)
+    # FD9=   did the keeper close its lock fd before exec'ing this child? An
+    #        inherited fd 9 keeps the lock alive in any process that outlives
+    #        the run, and the NEXT run then reports an overlap that is not real.
+    LOCKSTATE=unprobed
+    if [ -n "${STUB_LOCK_FILE:-}" ]; then
+      if flock -n 7 7>"$STUB_LOCK_FILE" 2>/dev/null; then LOCKSTATE=free; else LOCKSTATE=held; fi
+    fi
+    if [ -e /proc/self/fd/9 ]; then FD9=open; else FD9=closed; fi
+    echo "STEP=claim WAIT=${CLAIM_WITNESS_TIMEOUT_SECS:-unset} LOCK=$LOCKSTATE FD9=$FD9 ARGS=$*" >> "$STUB_LOG"
     exit "${STUB_CLAIM_EXIT:-0}"
     ;;
   *"keeper:convert"*)
@@ -418,6 +435,9 @@ if pending_has 0xstale001; then fail "stale pending: expired hash still in the p
 if summary_has "EXPIRED"; then ok "stale pending: reported as EXPIRED"; else fail "stale pending: no EXPIRED report: $OUTPUT"; fi
 if summary_has "relay: FAILED"; then fail "stale pending: expiry counted as an ordinary relay failure"; else ok "stale pending: expiry not counted as a relay failure"; fi
 if [ "$STATUS" -eq 0 ]; then ok "stale pending: overall exit 0 (nothing genuinely failed)"; else fail "stale pending: overall exit was $STATUS"; fi
+# Exit 0 is the plan's ruling, but the summary must not call permanent,
+# unrecoverable value loss "ok" -- that line is the only signal an operator gets.
+if summary_has "relay: ok"; then fail "stale pending: permanent loss reported as a plain 'ok'"; else ok "stale pending: permanent loss not reported as a plain 'ok'"; fi
 
 # --- Test 16 (ZER-13): a fresh hash alongside a stale one still fails loudly
 new_state
@@ -476,6 +496,68 @@ if [ "$(cat "$PENDING")" = "0xkeepts,$SEED_TS" ]; then
   ok "pending timestamp: preserved across a failed retry"
 else
   fail "pending timestamp: rewritten (expected '0xkeepts,$SEED_TS', got '$(cat "$PENDING")')"
+fi
+
+# --- Test 21 (ZER-13): the lock is HELD for the whole run, and not leaked ---
+new_state
+run_keeper STUB_FLUSH_TX=0xheld001 STUB_LOCK_FILE="$STATE_DIR/lock"
+case "$(claim_lines)" in
+  *"LOCK=held"*) ok "lock lifetime: still held while the relay step runs" ;;
+  *) fail "lock lifetime: not held during the relay step ($(claim_lines))" ;;
+esac
+case "$(claim_lines)" in
+  *"FD9=closed"*) ok "lock fd: closed in children, so it cannot outlive the run" ;;
+  *) fail "lock fd: inherited by the child -- an outliving process would keep the lock ($(claim_lines))" ;;
+esac
+
+# --- Test 22 (ZER-13): a corrupt pending line cannot derail the relay step --
+# pending-flush outlives upgrades and the header invites an operator to read
+# and edit it during manual recovery. The leading-zero stamp is the dangerous
+# shape: bash reads it as OCTAL, an invalid octal literal is a FATAL
+# arithmetic error, and that aborts the whole relay block -- skipping
+# write_pending and every summary line, so the run reports "all steps ok" with
+# exit 0 while relaying nothing, on this run and every run after it. Each
+# shape below must land on the "unknown age -> expired" path instead.
+for BAD in '0xoct001,0123456789' '0xbig002,99999999999999999999999' '0xtwo003,123,456' '0xnots004,' '0xjunk005,not-a-number'; do
+  new_state
+  printf '%s\n' "$BAD" > "$PENDING"
+  run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+  BADHASH="${BAD%%,*}"
+  if summary_has "relay:"; then ok "corrupt '$BAD': the relay step still reports a summary line"; else fail "corrupt '$BAD': the relay step vanished from the summary: $OUTPUT"; fi
+  if pending_has "$BADHASH"; then fail "corrupt '$BAD': the poisoned line survived in $PENDING"; else ok "corrupt '$BAD': poisoned line dropped"; fi
+  if [ -z "$(claim_args)" ]; then ok "corrupt '$BAD': never retried"; else fail "corrupt '$BAD': retried anyway ($(claim_args))"; fi
+  if [ "$STATUS" -eq 0 ]; then ok "corrupt '$BAD': exit 0 (an expiry is not a step failure)"; else fail "corrupt '$BAD': exit was $STATUS"; fi
+done
+
+# --- Test 23 (ZER-13): a stamp in the future is clock skew, not freshness ---
+# A clock that steps backwards must not make an entry immortal -- but must not
+# throw away value that is still perfectly claimable either.
+new_state
+printf '%s,%s\n' 0xfuture001 "$(( $(date +%s) + 60 ))" > "$PENDING"
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+case "$(claim_args)" in
+  *"--tx 0xfuture001"*) ok "future stamp (small skew): still retried, value not discarded" ;;
+  *) fail "future stamp (small skew): dropped instead of retried ($(claim_args))" ;;
+esac
+if summary_has "WARNING"; then ok "future stamp (small skew): the clock skew is reported"; else fail "future stamp (small skew): skew not reported: $OUTPUT"; fi
+
+new_state
+printf '%s,%s\n' 0xfuture002 "$(( $(date +%s) + 100000 ))" > "$PENDING"
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+if pending_has 0xfuture002; then fail "future stamp (absurd): kept, so it would never expire"; else ok "future stamp (absurd): dropped as untrustworthy"; fi
+if [ -z "$(claim_args)" ]; then ok "future stamp (absurd): never retried"; else fail "future stamp (absurd): retried anyway ($(claim_args))"; fi
+
+# --- Test 24 (ZER-13): the claim wait never outlives the proof window ------
+# Waiting the full 5400 s for a proof that stops being served in ~200 s is
+# exactly the wasted wait tracking an age was meant to bound.
+new_state
+pending_seed 0xclamp001 7000
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+WAITVAL=$(claim_lines | sed -n 's/.*WAIT=\([0-9]*\) .*/\1/p' | head -n 1)
+if [ -n "$WAITVAL" ] && [ "$WAITVAL" -ge 150 ] && [ "$WAITVAL" -le 200 ]; then
+  ok "claim wait: clamped to the ~200s left in the proof window (got ${WAITVAL}s)"
+else
+  fail "claim wait: not clamped to the remaining window (got '${WAITVAL:-none}', expected ~200)"
 fi
 
 echo

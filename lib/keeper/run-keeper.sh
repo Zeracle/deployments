@@ -39,6 +39,15 @@
 # L2 history on an archive node. That work is deliberately out of scope here;
 # the log line exists so the value is never silently written off.
 #
+# UPGRADING to this version: a pending-flush written by an older keeper has no
+# timestamps at all, so the FIRST run after the upgrade expires every line in
+# it — including one flushed minutes ago that is still perfectly claimable.
+# Before upgrading a box, read $KEEPER_STATE_DIR/pending-flush and relay
+# anything in it by hand (`yarn --cwd <v1-l2> claim:fees --tx <hash>`). An
+# empty or absent file needs nothing. This is deliberate: the alternative,
+# assuming an undated hash is fresh, is what keeps an unclaimable hash being
+# retried forever, and that is the bug this change exists to kill.
+#
 # Concurrency (ZER-13, Db-R19): the pending file is read once up front and
 # rewritten after the relay, so two overlapping runs (say a manual run during
 # a timer-triggered one) would each read the same list and the last `mv -f`
@@ -48,6 +57,11 @@
 # Non-blocking on purpose: a queued run could sit behind a relay holding the
 # lock for KEEPER_CLAIM_WAIT_SECS and only fire after the timer's next
 # interval, so failing fast and loud is the better operator experience.
+#
+# The lock lives on the open file descriptor (fd 9), not on this process, so
+# any child that inherited fd 9 would keep holding it after this script exits
+# — and the next run would report a live overlap that does not exist. Every
+# child is therefore started with fd 9 closed (`9>&-`).
 #
 # Env (required):
 #   KEEPER_L1_PRIVATE_KEY  - a SEPARATE, low-value L1 key. NEVER the
@@ -114,15 +128,18 @@
 #     L1_TOKEN_PORTAL             - relay; default deployment.json l1.tokenPortal
 #   L1 side (relay, convert, cushion):
 #     L1_RPC_URL (or ETH_RPC_URL) - default http://localhost:8545
-#     ETH_CHAIN_ID                - OPTIONAL everywhere in the keeper since
-#                                   ZER-13: relay, convert and cushion all build
-#                                   their chain from the RPC's own chain id, and
-#                                   only refuse an ETH_CHAIN_ID that disagrees
-#                                   with it. (Before that, claim-fees-l1.ts
-#                                   signed for foundry (31337) when it was
-#                                   unset.) Still set 11155111 on testnet: it
-#                                   costs nothing and catches an RPC pointed at
-#                                   the wrong network.
+#     ETH_CHAIN_ID                - convert and cushion build their chain from
+#                                   the RPC's own chain id and only refuse an
+#                                   ETH_CHAIN_ID that disagrees with it. The
+#                                   relay (claim-fees-l1.ts) does the same ONLY
+#                                   from ZER-13 onwards — the matching v1-l2
+#                                   change ships with this one. Against an
+#                                   OLDER v1-l2 checkout the relay still signs
+#                                   for foundry (31337) when ETH_CHAIN_ID is
+#                                   unset, so keep setting 11155111 on testnet:
+#                                   it costs nothing, it is required with an
+#                                   older v1-l2, and it catches an RPC pointed
+#                                   at the wrong network either way.
 #     L1_LIQUIDITY_POOL           - convert + cushion; default `liquidityPoolProxy`
 #                                   from ../v1-l1/deployments/local.json (31337)
 #                                   or local-testnet.json (11155111), chosen by
@@ -195,12 +212,34 @@ if ! mkdir -p "$KEEPER_STATE_DIR"; then
 fi
 
 # ZER-13 / Db-R19: exactly one keeper run at a time (see "Concurrency" in the
-# header). fd 9 stays open for the whole run; the kernel drops the lock when
-# this process exits, however it exits.
-exec 9>"$KEEPER_STATE_DIR/lock"
-if ! flock -n 9; then
+# header). fd 9 stays open for the whole run, and every child below closes it
+# (`9>&-`) so the lock cannot outlive this process.
+#
+# A failure to LOCK and a failure to SET UP the lock are reported differently
+# on purpose: telling an operator that "another run holds the lock" when the
+# real problem is an unwritable state dir or a missing flock sends them
+# hunting a run that does not exist.
+if ! command -v flock >/dev/null 2>&1; then
+  echo "flock (util-linux) is required to serialise keeper runs, but it is not on PATH." >&2
+  echo "Install util-linux, or add its directory to the unit's Environment=PATH=." >&2
+  echo "Aborting before any step runs." >&2
+  exit 1
+fi
+if ! exec 9>"$KEEPER_STATE_DIR/lock"; then
+  echo "Cannot open the keeper lock file $KEEPER_STATE_DIR/lock for writing." >&2
+  echo "Check the owner and mode of KEEPER_STATE_DIR ($KEEPER_STATE_DIR) — systemd's" >&2
+  echo "StateDirectory= creates it owned by User=. Aborting before any step runs." >&2
+  exit 1
+fi
+flock -n 9
+LOCK_STATUS=$?
+if [ "$LOCK_STATUS" -eq 1 ]; then
   echo "Another keeper run holds the lock ($KEEPER_STATE_DIR/lock). Aborting." >&2
   echo "This run has changed nothing. Wait for the running keeper to finish." >&2
+  exit 1
+elif [ "$LOCK_STATUS" -ne 0 ]; then
+  echo "Could not take the keeper lock ($KEEPER_STATE_DIR/lock): flock exited $LOCK_STATUS." >&2
+  echo "That is a setup problem, not a second keeper run. Aborting before any step runs." >&2
   exit 1
 fi
 
@@ -218,7 +257,7 @@ record_fail() { SUMMARY+=("$1: FAILED${2:+ ($2)}"); FAILS=$((FAILS + 1)); }
 # Every v1-l2 package script runs through `npx tsx` instead (claim:fees,
 # keeper:*), so this does the same. The scripts resolve deployment.json
 # against their cwd, hence the cd. The caller's environment passes through.
-v1l2_tsx() { (cd "$V1_L2_DIR" && NODE_NO_WARNINGS=1 npx tsx "$@"); }
+v1l2_tsx() { (cd "$V1_L2_DIR" && NODE_NO_WARNINGS=1 npx tsx "$@" 9>&-); }
 
 # write_pending <entry>...: atomically replace the pending file's contents.
 # Each entry is "<l2 flush tx hash>,<unix epoch seconds>" (ZER-13).
@@ -232,9 +271,20 @@ write_pending() {
 pending_hash() { printf '%s' "${1%%,*}"; }
 
 # pending_ts <entry>: the epoch seconds of one pending line, or '' when the age
-# is UNKNOWN — a pre-ZER-13 line with no comma, or a malformed/non-numeric
-# stamp. Unknown age is treated as expired rather than fresh: assuming an
-# unclaimable hash is still good is what kept it being retried forever.
+# is UNKNOWN — a pre-ZER-13 line with no comma, or a malformed stamp. Unknown
+# age is treated as expired rather than fresh: assuming an unclaimable hash is
+# still good is what kept it being retried forever.
+#
+# This parses UNTRUSTED input. pending-flush survives upgrades and an operator
+# is invited to read (and edit) it during manual recovery, so a stamp is
+# rejected unless it is a plain decimal epoch:
+#   - a LEADING ZERO would be read as OCTAL by the arithmetic below, and an
+#     invalid octal literal ("0123456789") is a fatal arithmetic error that
+#     aborts the whole relay block — skipping write_pending and every summary
+#     line, so the run would report "all steps ok" with exit 0 while silently
+#     relaying nothing, on this run and every run after it;
+#   - more than 11 digits can overflow the signed 64-bit arithmetic and come
+#     back NEGATIVE, which would read as "not yet expired" forever.
 pending_ts() {
   local ts
   case "$1" in
@@ -242,8 +292,9 @@ pending_ts() {
     *) ts="" ;;
   esac
   case "$ts" in
-    '' | *[!0-9]*) ts="" ;;
+    '' | *[!0-9]* | 0*) ts="" ;;
   esac
+  [ "${#ts}" -gt 11 ] && ts=""
   printf '%s' "$ts"
 }
 
@@ -321,20 +372,39 @@ else
   STILL_PENDING=()
   RELAYED=0
   EXPIRED=0
-  NOW=$(date +%s)
   for entry in "${PENDING[@]}"; do
     hash=$(pending_hash "$entry")
     ts=$(pending_ts "$entry")
+    # Re-read the clock per entry: one claim can wait KEEPER_CLAIM_WAIT_SECS
+    # (default 90 min), so a reading taken before the loop would judge later
+    # entries against an hour-and-a-half-stale "now".
+    NOW=$(date +%s)
     # ZER-13: past the proof window this can never succeed — drop it rather
     # than burn a full claim wait on it every run from here on.
     if [ -z "$ts" ]; then
-      echo "EXPIRED: flush tx $hash has no usable timestamp (a pre-ZER-13 pending-flush line), so its" >&2
-      echo "         age cannot be established and it may be past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window." >&2
+      echo "EXPIRED: flush tx $hash has no usable timestamp (a pre-ZER-13 line, or a malformed one), so" >&2
+      echo "         its age cannot be established and it may be past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window." >&2
       echo "         Dropping it; recovering its value is a manual, owner-side job — see this script's header." >&2
       EXPIRED=$((EXPIRED + 1))
       continue
     fi
-    AGE=$((NOW - ts))
+    # 10# forces base 10 belt-and-braces; pending_ts has already rejected the
+    # leading-zero shape that would otherwise be read as octal.
+    AGE=$((NOW - 10#$ts))
+    if [ "$AGE" -lt 0 ]; then
+      # The stamp is in the FUTURE: the clock moved backwards (this deployment
+      # has a documented history of chain/host clock skew in both directions).
+      if [ "$AGE" -lt "-$PENDING_FLUSH_MAX_AGE_SECS" ]; then
+        echo "EXPIRED: flush tx $hash is stamped $((-AGE))s in the future — further ahead than the whole" >&2
+        echo "         ${PENDING_FLUSH_MAX_AGE_SECS}s proof window, so the stamp cannot be trusted at all. Dropping it;" >&2
+        echo "         recovering its value is a manual, owner-side job — see this script's header." >&2
+        EXPIRED=$((EXPIRED + 1))
+        continue
+      fi
+      echo "WARNING: flush tx $hash is stamped $((-AGE))s in the future — this host's clock has moved" >&2
+      echo "         backwards. Treating it as brand new; it ages out normally once the clock catches up." >&2
+      AGE=0
+    fi
     if [ "$AGE" -gt "$PENDING_FLUSH_MAX_AGE_SECS" ]; then
       echo "EXPIRED: flush tx $hash is ${AGE}s old, past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window, and can never" >&2
       echo "         be claimed: the node has pruned the state its merkle proof comes from. Dropping it;" >&2
@@ -342,10 +412,16 @@ else
       EXPIRED=$((EXPIRED + 1))
       continue
     fi
-    echo "relaying flush tx $hash (age ${AGE}s, claim wait up to ${KEEPER_CLAIM_WAIT_SECS}s)..."
+    # Never wait longer than this hash can still be claimed for: bounding the
+    # wasted wait is the whole point of tracking an age. Floored at 1s because
+    # claim-fees-l1.ts rejects a non-positive CLAIM_WITNESS_TIMEOUT_SECS.
+    CLAIM_WAIT=$((PENDING_FLUSH_MAX_AGE_SECS - AGE))
+    [ "$CLAIM_WAIT" -gt "$KEEPER_CLAIM_WAIT_SECS" ] && CLAIM_WAIT="$KEEPER_CLAIM_WAIT_SECS"
+    [ "$CLAIM_WAIT" -lt 1 ] && CLAIM_WAIT=1
+    echo "relaying flush tx $hash (age ${AGE}s, claim wait up to ${CLAIM_WAIT}s)..."
     if L1_CLAIMER_PRIVATE_KEY="$KEEPER_L1_PRIVATE_KEY" \
-        CLAIM_WITNESS_TIMEOUT_SECS="$KEEPER_CLAIM_WAIT_SECS" \
-        yarn --cwd "$V1_L2_DIR" claim:fees --tx "$hash"; then
+        CLAIM_WITNESS_TIMEOUT_SECS="$CLAIM_WAIT" \
+        yarn --cwd "$V1_L2_DIR" claim:fees --tx "$hash" 9>&-; then
       RELAYED=$((RELAYED + 1))
     else
       # Kept verbatim, so the entry keeps its ORIGINAL timestamp and does
@@ -355,17 +431,22 @@ else
   done
   write_pending ${STILL_PENDING[@]+"${STILL_PENDING[@]}"}
   # Expiry is reported separately and never counted as a relay failure: it is
-  # a known dead end, not a step that went wrong this run.
+  # a known dead end, not a step that went wrong this run (and the exit code
+  # stays 0 for it). But the word "ok" is never printed on a line that reports
+  # permanently lost value — that status reads "attention".
+  RETRIED=$((${#PENDING[@]} - EXPIRED))
   EXPIRED_NOTE=""
   if [ "$EXPIRED" -gt 0 ]; then
-    EXPIRED_NOTE=", $EXPIRED EXPIRED past the ${PENDING_FLUSH_MAX_AGE_SECS}s proof window (manual recovery)"
+    EXPIRED_NOTE=", $EXPIRED EXPIRED past the ${PENDING_FLUSH_MAX_AGE_SECS}s proof window (unclaimable; manual recovery)"
   fi
+  FLUSH_NOTE=""
+  [ "$FLUSH_STATUS" -ne 0 ] && FLUSH_NOTE="; flush failed"
   if [ "${#STILL_PENDING[@]}" -gt 0 ]; then
-    record_fail "relay" "${#STILL_PENDING[@]} of ${#PENDING[@]} still pending in $PENDING_FLUSH_FILE, retried next run$EXPIRED_NOTE"
-  elif [ "$FLUSH_STATUS" -ne 0 ]; then
-    record "relay" "ok ($RELAYED relayed$EXPIRED_NOTE; flush failed)"
+    record_fail "relay" "${#STILL_PENDING[@]} of $RETRIED still pending in $PENDING_FLUSH_FILE, retried next run$EXPIRED_NOTE"
+  elif [ "$EXPIRED" -gt 0 ]; then
+    record "relay" "attention ($RELAYED relayed$EXPIRED_NOTE$FLUSH_NOTE)"
   else
-    record "relay" "ok ($RELAYED relayed$EXPIRED_NOTE)"
+    record "relay" "ok ($RELAYED relayed$FLUSH_NOTE)"
   fi
 fi
 
@@ -375,7 +456,7 @@ fi
 # this script's environment, so it is passed through unmodified rather than
 # renamed.
 step "convert"
-if yarn --cwd "$V1_L2_DIR" keeper:convert; then
+if yarn --cwd "$V1_L2_DIR" keeper:convert 9>&-; then
   record "convert" "ok"
 else
   record_fail "convert"
@@ -383,7 +464,7 @@ fi
 
 # --- 5. cushion ----------------------------------------------------------------
 step "cushion"
-if yarn --cwd "$V1_L2_DIR" keeper:cushion; then
+if yarn --cwd "$V1_L2_DIR" keeper:cushion 9>&-; then
   record "cushion" "ok"
 else
   record_fail "cushion"
