@@ -345,20 +345,42 @@ ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
 step "Preflight: checking deployer L1 fee-asset balance (fee-juice token)..."
 L1_FEE_JUICE_ADDRESS=$(echo "$NODE_INFO_JSON" | jq -r '.feeJuiceAddress')
 [[ "$L1_FEE_JUICE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "Aztec node at $AZTEC_NODE_URL did not report a valid L1 fee-juice token address (got '$L1_FEE_JUICE_ADDRESS')."
-FEE_ASSET_REQUIRED="${L1_FEE_ASSET_BRIDGE_AMOUNT:-1000000000000000000}"
-[[ "$FEE_ASSET_REQUIRED" =~ ^[0-9]+$ ]] || fail "L1_FEE_ASSET_BRIDGE_AMOUNT ($FEE_ASSET_REQUIRED) must be a base-10 integer (base units of the fee-juice token). See $SCRIPT_DIR/.env.example."
-if ! FEE_ASSET_BALANCE_OUT=$(cast call "$L1_FEE_JUICE_ADDRESS" 'balanceOf(address)(uint256)' "$DEPLOYER_ADDRESS" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
-  fail "Could not read the fee-juice token balance (token $L1_FEE_JUICE_ADDRESS, deployer $DEPLOYER_ADDRESS) from $TESTNET_L1_RPC_URL: $FEE_ASSET_BALANCE_OUT"
+# ZER-11: a re-run that reuses an already-bridged fee-juice claim makes no new
+# L1 fee-asset spend, so this gate must not demand the amount a second time.
+# The operator funds the deployer with exactly L1_FEE_ASSET_BRIDGE_AMOUNT (what
+# .env.example tells them to do); the run that crashed already spent it, so the
+# balance is now ~0. Demanding it again would fail here and make the recovery
+# path unreachable in precisely the case it exists for. deploy.ts applies the
+# same rule on its side (resolveDeployerClaimSource, utils/deployer_account.ts).
+# The path mirrors v1-l2's pendingFeeClaimPath(DEPLOYER_ACCOUNT_FILE), and
+# stage_l2_deploy sets DEPLOYER_ACCOUNT_FILE="$SCRIPT_DIR/deployer-account.json".
+PENDING_CLAIM_FILE="$SCRIPT_DIR/deployer-account.json.pending-claim.json"
+if [ -f "$PENDING_CLAIM_FILE" ]; then
+  FEE_ASSET_REQUIRED=0
+  FEE_ASSET_SUMMARY="not checked — Stage 2 reuses a pending claim, so it bridges nothing"
+  ok "Fee-juice token:   $L1_FEE_JUICE_ADDRESS"
+  warn "Pending fee-juice claim found: $PENDING_CLAIM_FILE"
+  warn "Stage 2 will REUSE the claim a previous run already bridged on L1 rather than bridging again,"
+  warn "so the deployer fee-asset balance gate is skipped for this run."
+  warn "That file holds the claim SECRET: keep it private, never commit or ship it. It is cleared"
+  warn "automatically once the claim is spent by the SponsoredFPC deploy."
+else
+  FEE_ASSET_REQUIRED="${L1_FEE_ASSET_BRIDGE_AMOUNT:-1000000000000000000}"
+  [[ "$FEE_ASSET_REQUIRED" =~ ^[0-9]+$ ]] || fail "L1_FEE_ASSET_BRIDGE_AMOUNT ($FEE_ASSET_REQUIRED) must be a base-10 integer (base units of the fee-juice token). See $SCRIPT_DIR/.env.example."
+  if ! FEE_ASSET_BALANCE_OUT=$(cast call "$L1_FEE_JUICE_ADDRESS" 'balanceOf(address)(uint256)' "$DEPLOYER_ADDRESS" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+    fail "Could not read the fee-juice token balance (token $L1_FEE_JUICE_ADDRESS, deployer $DEPLOYER_ADDRESS) from $TESTNET_L1_RPC_URL: $FEE_ASSET_BALANCE_OUT"
+  fi
+  # cast prints large uint256 values as "<decimal> [<scientific>]"; keep the decimal.
+  FEE_ASSET_BALANCE="${FEE_ASSET_BALANCE_OUT%% *}"
+  [[ "$FEE_ASSET_BALANCE" =~ ^[0-9]+$ ]] || fail "Unexpected balanceOf output from fee-juice token $L1_FEE_JUICE_ADDRESS: $FEE_ASSET_BALANCE_OUT"
+  # Exact big-integer compare: bash arithmetic overflows past 2^63 and awk rounds.
+  if ! python3 -c 'import sys; sys.exit(0 if int(sys.argv[1]) >= int(sys.argv[2]) else 1)' "$FEE_ASSET_BALANCE" "$FEE_ASSET_REQUIRED"; then
+    fail "Fee-asset shortfall: deployer $DEPLOYER_ADDRESS holds $FEE_ASSET_BALANCE base units of the L1 fee-juice token $L1_FEE_JUICE_ADDRESS, but the L2 deploy bridges $FEE_ASSET_REQUIRED (L1_FEE_ASSET_BRIDGE_AMOUNT, default 1e18). There is no faucet on a real network: fund the deployer with that token and retry. Nothing has been broadcast."
+  fi
+  FEE_ASSET_SUMMARY="$FEE_ASSET_BALANCE base units (L2 deploy bridges $FEE_ASSET_REQUIRED)"
+  ok "Fee-juice token:   $L1_FEE_JUICE_ADDRESS"
+  ok "Fee-asset balance: $FEE_ASSET_BALANCE base units (>= $FEE_ASSET_REQUIRED required)"
 fi
-# cast prints large uint256 values as "<decimal> [<scientific>]"; keep the decimal.
-FEE_ASSET_BALANCE="${FEE_ASSET_BALANCE_OUT%% *}"
-[[ "$FEE_ASSET_BALANCE" =~ ^[0-9]+$ ]] || fail "Unexpected balanceOf output from fee-juice token $L1_FEE_JUICE_ADDRESS: $FEE_ASSET_BALANCE_OUT"
-# Exact big-integer compare: bash arithmetic overflows past 2^63 and awk rounds.
-if ! python3 -c 'import sys; sys.exit(0 if int(sys.argv[1]) >= int(sys.argv[2]) else 1)' "$FEE_ASSET_BALANCE" "$FEE_ASSET_REQUIRED"; then
-  fail "Fee-asset shortfall: deployer $DEPLOYER_ADDRESS holds $FEE_ASSET_BALANCE base units of the L1 fee-juice token $L1_FEE_JUICE_ADDRESS, but the L2 deploy bridges $FEE_ASSET_REQUIRED (L1_FEE_ASSET_BRIDGE_AMOUNT, default 1e18). There is no faucet on a real network: fund the deployer with that token and retry. Nothing has been broadcast."
-fi
-ok "Fee-juice token:   $L1_FEE_JUICE_ADDRESS"
-ok "Fee-asset balance: $FEE_ASSET_BALANCE base units (>= $FEE_ASSET_REQUIRED required)"
 
 step "Preflight: checking prebuilt L2 artifacts + web env template..."
 # Hoisted from stage_l2_deploy/stage_manifest_sync (same fail messages) so a
@@ -400,7 +422,7 @@ cat <<SUMMARY
   L1 Registry address:          $L1_REGISTRY_ADDRESS
   L1 FeeJuicePortal address:    $L1_FEE_JUICE_PORTAL_ADDRESS
   L1 fee-juice token:           $L1_FEE_JUICE_ADDRESS
-  Deployer fee-asset balance:   $FEE_ASSET_BALANCE base units (L2 deploy bridges $FEE_ASSET_REQUIRED)
+  Deployer fee-asset balance:   $FEE_ASSET_SUMMARY
   ETHERSCAN_API_KEY set:        $([ -n "${ETHERSCAN_API_KEY:-}" ] && echo "yes (--verify will run on L1 targets)" || echo "no (contracts deploy unverified)")
 
 SUMMARY

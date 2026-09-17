@@ -28,6 +28,9 @@ in and run `make <target>`.
 - `testnet/` — `deploy-testnet.sh` now runs a real, config-gated pipeline
   (preflight → Sepolia L1 → official Aztec testnet L2 → manifest/web-env
   sync); see `testnet/README.md` for prerequisites and usage.
+- `lib/` — shared shell helpers, plus `lib/test/` and `sandbox-local/test/`:
+  offline tests that read and parse the deploy scripts rather than running
+  them (no RPC, no keys, no network). Run them with `make -C deployments test`.
 - `mainnet/` — `deploy-mainnet.sh`: still a fail-loud stub (exit 1) until
   that migration starts. See its README and
   `docs/versions/260709/existing-limitations.md` (repo root) for the
@@ -37,8 +40,8 @@ Each environment dir owns its own deployment script(s), and the Makefile has
 per-env targets: `deploy-sandbox-local` (alias `deploy`),
 `deploy-sandbox-local-skip-infra` (alias `deploy-skip-infra`),
 `stop-sandbox-local` (alias `stop`), `stop-clean`, `deploy-sandbox-ec2`,
-`deploy-sandbox-ec2-apply`, `deploy-testnet`, `deploy-mainnet`. Run
-`make -C deployments help` for the full list.
+`deploy-sandbox-ec2-apply`, `deploy-testnet`, `deploy-mainnet`, plus `test`
+for the offline shell tests. Run `make -C deployments help` for the full list.
 
 **Terminology:** sandbox != testnet. Both `sandbox-local` and `sandbox-ec2`
 run the Aztec *sandbox* (single-node, local); "testnet" only ever refers to
