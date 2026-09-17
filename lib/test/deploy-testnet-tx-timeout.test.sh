@@ -12,12 +12,21 @@
 # default and a real testnet deploy times out mid-flight -- after Stage 1 has
 # already broadcast (and paid for) every L1 transaction.
 #
+# The same variable also caps the sandbox block-nudge wait
+# (readDeployTxTimeoutSecs(60), v1-l2/utils/fee_juice.ts), so 600 raises that
+# too. Harmless here: testnet mode returns from nudgeSandboxBlock before the
+# wait, but anyone retuning the value should know it is not single-purpose.
+#
+# Cross-repo caveat: this guard asserts the deployments side only. Renaming the
+# variable or changing the 180 s default in v1-l2 passes this guard while still
+# breaking production. No test in this repo can catch that.
+#
 # This test NEVER executes deploy-testnet.sh. It only parses and reads its
 # source, so it is safe to run anywhere: no RPC, no keys, no network.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-SCRIPT="$HERE/../../testnet/deploy-testnet.sh"
+SCRIPT="${1:-$HERE/../../testnet/deploy-testnet.sh}"
 
 [ -f "$SCRIPT" ] || { echo "FAIL: $SCRIPT not found"; exit 1; }
 
@@ -25,8 +34,14 @@ SCRIPT="$HERE/../../testnet/deploy-testnet.sh"
 #    command covers both).
 bash -n "$SCRIPT" || { echo "FAIL: deploy-testnet.sh is not syntactically valid"; exit 1; }
 
-# 2. DEPLOY_TX_TIMEOUT_SECS is set at all.
-TIMEOUT_LINES=$(grep -n 'DEPLOY_TX_TIMEOUT_SECS=' "$SCRIPT" || true)
+# Comment lines are skipped throughout. Documenting the 180 s default in prose
+# is a legitimate edit -- the sibling half of this very ticket documents
+# defaults in .env.example -- and a guard that fails on correct code gets
+# loosened or deleted.
+strip_comments() { grep -vE '^[0-9]+:[[:space:]]*#'; }
+
+# 2. DEPLOY_TX_TIMEOUT_SECS is set at all, in real code.
+TIMEOUT_LINES=$(grep -n 'DEPLOY_TX_TIMEOUT_SECS=' "$SCRIPT" | strip_comments || true)
 if [ -z "$TIMEOUT_LINES" ]; then
   echo "FAIL: deploy-testnet.sh no longer sets DEPLOY_TX_TIMEOUT_SECS."
   echo "      Without it the L2 deploy falls back to the 180 s default, which the"
@@ -34,40 +49,64 @@ if [ -z "$TIMEOUT_LINES" ]; then
   exit 1
 fi
 
-# 3. Every occurrence is 600 -- not 180, and not some other value.
+# 3. Every real assignment is 600 -- not 180, and not some other value.
+#    Tolerates tabs, a trailing continuation backslash and quoting; deliberately
+#    does NOT tolerate an env-overridable default such as ${VAR:-600}, because
+#    that would let .env silently reinstate 180.
 while IFS= read -r line; do
   value=${line#*DEPLOY_TX_TIMEOUT_SECS=}
-  value=${value%% *}          # drop a trailing " \" continuation
-  value=${value%%\\*}         # ...and a bare trailing backslash
+  value=${value%%[[:space:]]*}     # drop a trailing " \" / tab continuation
+  value=${value%%\\*}              # ...and a bare trailing backslash
+  value=${value//\"/}              # ...and surrounding quotes
+  value=${value//\'/}
   if [ "$value" != "600" ]; then
-    echo "FAIL: expected DEPLOY_TX_TIMEOUT_SECS=600, got '$value' at ${line%%:*}"
+    echo "FAIL: expected DEPLOY_TX_TIMEOUT_SECS=600, got '$value' at line ${line%%:*}"
+    case "$value" in
+      *'${'*)
+        echo "      An env-overridable default is rejected on purpose: deploy-testnet.sh"
+        echo "      sources .env with \`set -a\`, so it would let .env reinstate 180 s."
+        ;;
+    esac
     exit 1
   fi
 done <<< "$TIMEOUT_LINES"
 
-# 4. It actually reaches the L2 deploy: the assignment must sit inside the
-#    backslash-continued env prefix of the `yarn deploy:clean` invocation, not
-#    merely somewhere in the file (a stray assignment in a comment or an
-#    unrelated stage would not be exported to deploy.ts).
-#    Comment lines are skipped: the Stage 2 header block above the invocation
-#    describes `yarn deploy:clean` in prose, and matching that instead would
-#    make this guard pass while checking nothing.
-DEPLOY_BLOCK=$(awk '
-  { lines[NR] = $0 }
-  /yarn deploy:clean/ && $0 !~ /^[[:space:]]*#/ && !found { found = NR }
-  END {
-    if (!found) exit 1
-    start = found
-    while (start > 1 && lines[start - 1] ~ /\\[[:space:]]*$/) start--
-    for (i = start; i <= found; i++) print lines[i]
-  }
-' "$SCRIPT") || { echo "FAIL: no 'yarn deploy:clean' invocation found in deploy-testnet.sh"; exit 1; }
-
-if ! grep -q 'DEPLOY_TX_TIMEOUT_SECS=600' <<< "$DEPLOY_BLOCK"; then
-  echo "FAIL: the 'yarn deploy:clean' invocation does not carry DEPLOY_TX_TIMEOUT_SECS=600."
-  echo "      Found this env prefix:"
-  sed 's/^/        /' <<< "$DEPLOY_BLOCK"
+# 4. EVERY real invocation carries it. Matching `yarn deploy:clean` only where
+#    it starts a command excludes both the prose comments above the Stage 2
+#    block and the error-message string on the line after the invocation, so
+#    each hit below is a genuine command whose env prefix must be checked. A
+#    retry or stage-rerun branch added later is exactly the case where a 180 s
+#    timeout bites, so a second invocation must not slip through unchecked.
+INVOCATION_LINES=$(grep -nE '^[[:space:]]*yarn[[:space:]]+deploy:clean([[:space:]]|$)' "$SCRIPT" | cut -d: -f1 || true)
+if [ -z "$INVOCATION_LINES" ]; then
+  echo "FAIL: no 'yarn deploy:clean' command found in deploy-testnet.sh."
+  echo "      Either Stage 2 no longer runs the L2 deploy, or the invocation was"
+  echo "      reshaped so this guard can no longer see it. Check both."
   exit 1
 fi
 
-echo "deploy-testnet DEPLOY_TX_TIMEOUT_SECS guard: ok"
+while IFS= read -r lineno; do
+  # Walk back over the backslash-continued env prefix of this invocation.
+  BLOCK=$(awk -v target="$lineno" '
+    { lines[NR] = $0 }
+    END {
+      start = target
+      while (start > 1 && lines[start - 1] ~ /\\[[:space:]]*$/) start--
+      for (i = start; i <= target; i++) print lines[i]
+    }
+  ' "$SCRIPT")
+
+  # Presence, not value: check 3 has already proved that every real assignment
+  # in the file is exactly 600, so re-matching the literal "=600" here would
+  # false-fail on a perfectly correct DEPLOY_TX_TIMEOUT_SECS="600". What this
+  # check adds is that the assignment reaches THIS invocation's env prefix,
+  # rather than sitting somewhere else in the file where deploy.ts never sees it.
+  if ! grep -q 'DEPLOY_TX_TIMEOUT_SECS=' <<< "$BLOCK"; then
+    echo "FAIL: the 'yarn deploy:clean' invocation at line $lineno does not carry"
+    echo "      DEPLOY_TX_TIMEOUT_SECS in its env prefix. Found:"
+    sed 's/^/        /' <<< "$BLOCK"
+    exit 1
+  fi
+done <<< "$INVOCATION_LINES"
+
+echo "deploy-testnet DEPLOY_TX_TIMEOUT_SECS guard: ok ($(wc -l <<< "$INVOCATION_LINES") invocation(s) checked)"
