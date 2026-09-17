@@ -23,6 +23,32 @@
 # in-run wait (KEEPER_CLAIM_WAIT_SECS) is what covers slow proving; the
 # cross-run retry only helps if the next run comes inside that window.
 #
+# Expiry (ZER-13): because of that same ~2 h window, a hash whose epoch has
+# been pruned from the node's world state can NEVER be claimed again. Retrying
+# it forever costs a full KEEPER_CLAIM_WAIT_SECS per run and reports the relay
+# step FAILED every time, which buries any genuinely new failure. So each
+# pending line carries the epoch second it was recorded
+# ("<l2 flush tx hash>,<unix epoch seconds>"), and a line older than
+# PENDING_FLUSH_MAX_AGE_SECS is dropped with an EXPIRED log line instead of
+# being retried. Expiry is NOT counted as a relay failure.
+#
+# An EXPIRED hash needs MANUAL, OWNER-SIDE RECOVERY — this script cannot fix
+# it and does not pretend to. The L2->L1 message itself still sits unconsumed
+# in the L1 Outbox, but the merkle proof a claim needs is derived from node
+# state that has been pruned, so re-deriving it means replaying the relevant
+# L2 history on an archive node. That work is deliberately out of scope here;
+# the log line exists so the value is never silently written off.
+#
+# Concurrency (ZER-13, Db-R19): the pending file is read once up front and
+# rewritten after the relay, so two overlapping runs (say a manual run during
+# a timer-triggered one) would each read the same list and the last `mv -f`
+# would silently drop the other's update — including an in-flight relay's
+# hash. Every run therefore takes an exclusive, NON-BLOCKING flock on
+# $KEEPER_STATE_DIR/lock and aborts immediately if another run holds it.
+# Non-blocking on purpose: a queued run could sit behind a relay holding the
+# lock for KEEPER_CLAIM_WAIT_SECS and only fire after the timer's next
+# interval, so failing fast and loud is the better operator experience.
+#
 # Env (required):
 #   KEEPER_L1_PRIVATE_KEY  - a SEPARATE, low-value L1 key. NEVER the
 #                            deployer key: this script refuses to start if it
@@ -54,11 +80,22 @@
 # Env (optional, keeper):
 #   KEEPER_STATE_DIR       - default /var/lib/zeracle-keeper (created if
 #                            missing; the service template's StateDirectory=
-#                            creates it too). Holds `pending-flush`, one L2 flush
-#                            tx hash per line.
+#                            creates it too). Holds `pending-flush` — one
+#                            "<l2 flush tx hash>,<unix epoch seconds>" line per
+#                            pending relay — and `lock`, the flock file that
+#                            keeps two runs from overlapping.
 #   KEEPER_CLAIM_WAIT_SECS - default 5400 (90 min, inside the ~2 h proof
 #                            window). Passed to claim-fees-l1.ts as
 #                            CLAIM_WITNESS_TIMEOUT_SECS, per pending hash.
+#   PENDING_FLUSH_MAX_AGE_SECS
+#                          - default 7200 (the ~2 h the node serves L2->L1
+#                            message proofs for). A pending line older than
+#                            this is EXPIRED and dropped, not retried. This
+#                            tracks the NODE's world-state retention
+#                            (WS_NUM_HISTORIC_CHECKPOINTS, default 64), which
+#                            is infra config — hence an override rather than a
+#                            constant. Raise it only if the node you relay
+#                            against genuinely keeps more history.
 #
 # Env contract (final review Important 3), passed through unmodified to the
 # v1-l2 scripts — see each script's header for the full defaults:
@@ -77,11 +114,15 @@
 #     L1_TOKEN_PORTAL             - relay; default deployment.json l1.tokenPortal
 #   L1 side (relay, convert, cushion):
 #     L1_RPC_URL (or ETH_RPC_URL) - default http://localhost:8545
-#     ETH_CHAIN_ID                - set 11155111 on testnet. claim-fees-l1.ts
-#                                   signs for foundry (31337) without it;
-#                                   convert/cushion build their chain from the
-#                                   RPC's own chain id and refuse an ETH_CHAIN_ID
-#                                   that disagrees with it.
+#     ETH_CHAIN_ID                - OPTIONAL everywhere in the keeper since
+#                                   ZER-13: relay, convert and cushion all build
+#                                   their chain from the RPC's own chain id, and
+#                                   only refuse an ETH_CHAIN_ID that disagrees
+#                                   with it. (Before that, claim-fees-l1.ts
+#                                   signed for foundry (31337) when it was
+#                                   unset.) Still set 11155111 on testnet: it
+#                                   costs nothing and catches an RPC pointed at
+#                                   the wrong network.
 #     L1_LIQUIDITY_POOL           - convert + cushion; default `liquidityPoolProxy`
 #                                   from ../v1-l1/deployments/local.json (31337)
 #                                   or local-testnet.json (11155111), chosen by
@@ -143,10 +184,23 @@ unset KEEPER_KEY_NORM DEPLOYER_KEY_VAR
 
 KEEPER_STATE_DIR="${KEEPER_STATE_DIR:-/var/lib/zeracle-keeper}"
 KEEPER_CLAIM_WAIT_SECS="${KEEPER_CLAIM_WAIT_SECS:-5400}"
+# ZER-13: how long a pending flush hash can still be claimed — see the
+# "Expiry" paragraph in the header for why this tracks node infra config.
+PENDING_FLUSH_MAX_AGE_SECS="${PENDING_FLUSH_MAX_AGE_SECS:-7200}"
 PENDING_FLUSH_FILE="$KEEPER_STATE_DIR/pending-flush"
 if ! mkdir -p "$KEEPER_STATE_DIR"; then
   echo "Cannot create KEEPER_STATE_DIR=$KEEPER_STATE_DIR (pending flush relays live there)." >&2
   echo "Set KEEPER_STATE_DIR to a writable directory. Aborting before any step runs." >&2
+  exit 1
+fi
+
+# ZER-13 / Db-R19: exactly one keeper run at a time (see "Concurrency" in the
+# header). fd 9 stays open for the whole run; the kernel drops the lock when
+# this process exits, however it exits.
+exec 9>"$KEEPER_STATE_DIR/lock"
+if ! flock -n 9; then
+  echo "Another keeper run holds the lock ($KEEPER_STATE_DIR/lock). Aborting." >&2
+  echo "This run has changed nothing. Wait for the running keeper to finish." >&2
   exit 1
 fi
 
@@ -166,11 +220,31 @@ record_fail() { SUMMARY+=("$1: FAILED${2:+ ($2)}"); FAILS=$((FAILS + 1)); }
 # against their cwd, hence the cd. The caller's environment passes through.
 v1l2_tsx() { (cd "$V1_L2_DIR" && NODE_NO_WARNINGS=1 npx tsx "$@"); }
 
-# write_pending <hash>...: atomically replace the pending file's contents.
+# write_pending <entry>...: atomically replace the pending file's contents.
+# Each entry is "<l2 flush tx hash>,<unix epoch seconds>" (ZER-13).
 write_pending() {
   local tmp="$PENDING_FLUSH_FILE.tmp"
   if [ "$#" -eq 0 ]; then : > "$tmp"; else printf '%s\n' "$@" > "$tmp"; fi
   mv -f "$tmp" "$PENDING_FLUSH_FILE"
+}
+
+# pending_hash <entry>: the tx hash of one pending line.
+pending_hash() { printf '%s' "${1%%,*}"; }
+
+# pending_ts <entry>: the epoch seconds of one pending line, or '' when the age
+# is UNKNOWN — a pre-ZER-13 line with no comma, or a malformed/non-numeric
+# stamp. Unknown age is treated as expired rather than fresh: assuming an
+# unclaimable hash is still good is what kept it being retried forever.
+pending_ts() {
+  local ts
+  case "$1" in
+    *,*) ts="${1##*,}" ;;
+    *) ts="" ;;
+  esac
+  case "$ts" in
+    '' | *[!0-9]*) ts="" ;;
+  esac
+  printf '%s' "$ts"
 }
 
 # --- 1. sweep (operator mode: ZRCL_ADDRESS from env, sweep everything) ------
@@ -216,10 +290,13 @@ if [ -f "$PENDING_FLUSH_FILE" ]; then
 fi
 if [ -n "$FLUSH_TX" ]; then
   ALREADY_PENDING=0
-  for hash in ${PENDING[@]+"${PENDING[@]}"}; do
-    [ "$hash" = "$FLUSH_TX" ] && ALREADY_PENDING=1
+  for entry in ${PENDING[@]+"${PENDING[@]}"}; do
+    [ "$(pending_hash "$entry")" = "$FLUSH_TX" ] && ALREADY_PENDING=1
   done
-  [ "$ALREADY_PENDING" -eq 0 ] && PENDING+=("$FLUSH_TX")
+  # Stamped once, when first seen: the age this run measures is the age of the
+  # FLUSH, not of the last rewrite (re-stamping would push the expiry window
+  # permanently out of reach).
+  [ "$ALREADY_PENDING" -eq 0 ] && PENDING+=("$FLUSH_TX,$(date +%s)")
   write_pending "${PENDING[@]}"
 fi
 
@@ -243,23 +320,52 @@ if [ "${#PENDING[@]}" -eq 0 ]; then
 else
   STILL_PENDING=()
   RELAYED=0
-  for hash in "${PENDING[@]}"; do
-    echo "relaying flush tx $hash (claim wait up to ${KEEPER_CLAIM_WAIT_SECS}s)..."
+  EXPIRED=0
+  NOW=$(date +%s)
+  for entry in "${PENDING[@]}"; do
+    hash=$(pending_hash "$entry")
+    ts=$(pending_ts "$entry")
+    # ZER-13: past the proof window this can never succeed — drop it rather
+    # than burn a full claim wait on it every run from here on.
+    if [ -z "$ts" ]; then
+      echo "EXPIRED: flush tx $hash has no usable timestamp (a pre-ZER-13 pending-flush line), so its" >&2
+      echo "         age cannot be established and it may be past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window." >&2
+      echo "         Dropping it; recovering its value is a manual, owner-side job — see this script's header." >&2
+      EXPIRED=$((EXPIRED + 1))
+      continue
+    fi
+    AGE=$((NOW - ts))
+    if [ "$AGE" -gt "$PENDING_FLUSH_MAX_AGE_SECS" ]; then
+      echo "EXPIRED: flush tx $hash is ${AGE}s old, past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window, and can never" >&2
+      echo "         be claimed: the node has pruned the state its merkle proof comes from. Dropping it;" >&2
+      echo "         recovering its value is a manual, owner-side job — see this script's header." >&2
+      EXPIRED=$((EXPIRED + 1))
+      continue
+    fi
+    echo "relaying flush tx $hash (age ${AGE}s, claim wait up to ${KEEPER_CLAIM_WAIT_SECS}s)..."
     if L1_CLAIMER_PRIVATE_KEY="$KEEPER_L1_PRIVATE_KEY" \
         CLAIM_WITNESS_TIMEOUT_SECS="$KEEPER_CLAIM_WAIT_SECS" \
         yarn --cwd "$V1_L2_DIR" claim:fees --tx "$hash"; then
       RELAYED=$((RELAYED + 1))
     else
-      STILL_PENDING+=("$hash")
+      # Kept verbatim, so the entry keeps its ORIGINAL timestamp and does
+      # eventually age out instead of being retried forever.
+      STILL_PENDING+=("$entry")
     fi
   done
   write_pending ${STILL_PENDING[@]+"${STILL_PENDING[@]}"}
+  # Expiry is reported separately and never counted as a relay failure: it is
+  # a known dead end, not a step that went wrong this run.
+  EXPIRED_NOTE=""
+  if [ "$EXPIRED" -gt 0 ]; then
+    EXPIRED_NOTE=", $EXPIRED EXPIRED past the ${PENDING_FLUSH_MAX_AGE_SECS}s proof window (manual recovery)"
+  fi
   if [ "${#STILL_PENDING[@]}" -gt 0 ]; then
-    record_fail "relay" "${#STILL_PENDING[@]} of ${#PENDING[@]} still pending in $PENDING_FLUSH_FILE, retried next run"
+    record_fail "relay" "${#STILL_PENDING[@]} of ${#PENDING[@]} still pending in $PENDING_FLUSH_FILE, retried next run$EXPIRED_NOTE"
   elif [ "$FLUSH_STATUS" -ne 0 ]; then
-    record "relay" "ok ($RELAYED relayed; flush failed)"
+    record "relay" "ok ($RELAYED relayed$EXPIRED_NOTE; flush failed)"
   else
-    record "relay" "ok ($RELAYED relayed)"
+    record "relay" "ok ($RELAYED relayed$EXPIRED_NOTE)"
   fi
 fi
 

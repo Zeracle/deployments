@@ -13,6 +13,11 @@
 #   - Important 2: a pending flush hash surviving a failed claim, being
 #     retried and cleared on the next run, a flush failure never being
 #     reported as a relay ok, and the claim wait budget reaching claim:fees
+#   - ZER-13 / Db-R19: a second, overlapping run refusing to start rather than
+#     racing the first one's read-modify-write of pending-flush (flock)
+#   - ZER-13: a pending hash past the ~2 h proof window being EXPIRED and
+#     dropped instead of retried (and re-FAILED) forever, while a still-fresh
+#     hash keeps failing loudly and keeps its ORIGINAL timestamp
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -146,15 +151,20 @@ claim_args() {
 # new_state: a fresh, empty KEEPER_STATE_DIR for one scenario.
 new_state() { STATE_DIR=$(mktemp -d "$STATE_ROOT/state.XXXXXX"); PENDING="$STATE_DIR/pending-flush"; }
 
-# pending_has <hash>: 0 if <hash> is a line of the pending file.
+# pending_has <hash>: 0 if <hash> is the hash field of a line of the pending
+# file. Lines are "<hash>,<unix epoch>" (ZER-13); a legacy bare hash has no
+# comma, and ${line%%,*} yields the whole line for it, so both shapes match.
 pending_has() {
   local line
   [ -f "$PENDING" ] || return 1
   while IFS= read -r line; do
-    [ "$line" = "$1" ] && return 0
+    [ "${line%%,*}" = "$1" ] && return 0
   done < "$PENDING"
   return 1
 }
+
+# pending_seed <hash> <age-in-seconds>: write one pending line aged <age> s.
+pending_seed() { printf '%s,%s\n' "$1" "$(( $(date +%s) - $2 ))" >> "$PENDING"; }
 
 # run_keeper [VAR=value ...]: runs run-keeper.sh with the stub PATH and a
 # complete default env (later assignments override earlier ones), capturing
@@ -312,7 +322,7 @@ if summary_has "relay: ok"; then fail "flush fails: relay reported ok"; else ok 
 
 # --- Test 9: a flush failure still retries an OLDER pending hash -----------
 new_state
-echo 0xbbb222 > "$PENDING"
+pending_seed 0xbbb222 0
 run_keeper STUB_FLUSH_EXIT=1 STUB_FLUSH_TX=""
 CLAIM_ARGS=$(claim_args)
 case "$CLAIM_ARGS" in
@@ -323,7 +333,8 @@ if pending_has 0xbbb222; then fail "flush fails + older pending: hash not cleare
 
 # --- Test 10: several pending hashes, oldest first, a new one deduplicated --
 new_state
-printf '%s\n' 0xold001 0xnew002 > "$PENDING"
+pending_seed 0xold001 0
+pending_seed 0xnew002 0
 run_keeper STUB_FLUSH_TX=0xnew002
 N_CLAIMS=$(claim_lines | awk 'END{print NR}')
 if [ "$N_CLAIMS" -eq 2 ]; then ok "multi pending: one claim per distinct hash ($N_CLAIMS)"; else fail "multi pending: expected 2 claims, got $N_CLAIMS"; fi
@@ -372,6 +383,100 @@ case "$(while IFS= read -r line; do case "$line" in "STEP=sweep "*) echo "$line"
   *"tsx scripts/sweep-fees.ts --all"*) ok "sweep: still operator mode, --all" ;;
   *) fail "sweep: --all not passed" ;;
 esac
+
+# --- Test 14 (ZER-13 / Db-R19): an overlapping run refuses to start --------
+# Two keeper runs (a manual one during a timer-triggered one) each read
+# pending-flush, each rewrite it, and the last `mv -f` wins — silently dropping
+# an in-flight relay's hash. flock -n makes the second run fail fast and loud.
+new_state
+pending_seed 0xlocked111 0
+BEFORE=$(cat "$PENDING")
+exec 8>"$STATE_DIR/lock"
+if flock -n 8; then
+  run_keeper STUB_FLUSH_TX=0xlocked222
+  if [ "$STATUS" -ne 0 ]; then ok "lock held: exit non-zero"; else fail "lock held: exit was 0"; fi
+  if [ ! -s "$STUB_LOG" ]; then ok "lock held: no step ran"; else fail "lock held: a step ran anyway ($(cat "$STUB_LOG"))"; fi
+  if summary_has "Another keeper run holds the lock"; then ok "lock held: names the lock as the reason"; else fail "lock held: no lock message: $OUTPUT"; fi
+  if [ "$(cat "$PENDING")" = "$BEFORE" ]; then ok "lock held: pending-flush left untouched"; else fail "lock held: pending-flush was rewritten ($(cat "$PENDING"))"; fi
+  exec 8>&-
+  run_keeper STUB_FLUSH_TX=0xlocked222
+  if [ "$STATUS" -eq 0 ]; then ok "lock released: the next run proceeds"; else fail "lock released: exit was $STATUS"; fi
+else
+  fail "test 14 setup: could not take $STATE_DIR/lock first"
+  exec 8>&-
+fi
+
+# --- Test 15 (ZER-13): a hash past the proof window is EXPIRED, not retried -
+# The node serves L2->L1 message proofs for roughly 2 h. Past that a hash can
+# never be claimed, so retrying it costs a full KEEPER_CLAIM_WAIT_SECS every
+# run and reports FAILED forever, hiding any NEW failure behind the noise.
+new_state
+pending_seed 0xstale001 10000
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+if [ -z "$(claim_args)" ]; then ok "stale pending: expired hash never retried"; else fail "stale pending: expired hash was retried ($(claim_args))"; fi
+if pending_has 0xstale001; then fail "stale pending: expired hash still in the pending file"; else ok "stale pending: expired hash dropped from the pending file"; fi
+if summary_has "EXPIRED"; then ok "stale pending: reported as EXPIRED"; else fail "stale pending: no EXPIRED report: $OUTPUT"; fi
+if summary_has "relay: FAILED"; then fail "stale pending: expiry counted as an ordinary relay failure"; else ok "stale pending: expiry not counted as a relay failure"; fi
+if [ "$STATUS" -eq 0 ]; then ok "stale pending: overall exit 0 (nothing genuinely failed)"; else fail "stale pending: overall exit was $STATUS"; fi
+
+# --- Test 16 (ZER-13): a fresh hash alongside a stale one still fails loudly
+new_state
+pending_seed 0xstale002 10000
+pending_seed 0xfresh002 0
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+CLAIM_ARGS=$(claim_args)
+case "$CLAIM_ARGS" in
+  *"--tx 0xfresh002"*) ok "mixed pending: the fresh hash is still retried" ;;
+  *) fail "mixed pending: fresh hash not retried (claim args: $CLAIM_ARGS)" ;;
+esac
+if [ "$(claim_lines | awk 'END{print NR}')" -eq 1 ]; then ok "mixed pending: only the fresh hash is claimed"; else fail "mixed pending: expected 1 claim, got $(claim_lines | awk 'END{print NR}')"; fi
+if pending_has 0xstale002; then fail "mixed pending: stale hash kept"; else ok "mixed pending: stale hash dropped"; fi
+if pending_has 0xfresh002; then ok "mixed pending: fresh hash kept for the next run"; else fail "mixed pending: fresh hash lost"; fi
+if summary_has "relay: FAILED"; then ok "mixed pending: the fresh failure is still reported FAILED"; else fail "mixed pending: fresh failure not reported: $OUTPUT"; fi
+
+# --- Test 17 (ZER-13): a legacy bare-hash line has unknown age -> expired ---
+# The pre-ZER-13 format carried no timestamp. Treating it as fresh would keep
+# an unclaimable hash alive forever; expiring it forces a clean migration.
+new_state
+echo 0xlegacy001 > "$PENDING"
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+if [ -z "$(claim_args)" ]; then ok "legacy line: not retried"; else fail "legacy line: retried anyway ($(claim_args))"; fi
+if pending_has 0xlegacy001; then fail "legacy line: still in the pending file"; else ok "legacy line: dropped from the pending file"; fi
+if summary_has "EXPIRED"; then ok "legacy line: reported as EXPIRED"; else fail "legacy line: no EXPIRED report: $OUTPUT"; fi
+
+# --- Test 18 (ZER-13): PENDING_FLUSH_MAX_AGE_SECS widens the window --------
+# The window tracks the node's proof-serving retention, which is infra config
+# (WS_NUM_HISTORIC_CHECKPOINTS), not a constant of this repo.
+new_state
+pending_seed 0xwide001 10000
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1 PENDING_FLUSH_MAX_AGE_SECS=86400
+case "$(claim_args)" in
+  *"--tx 0xwide001"*) ok "max-age override: a hash inside the widened window is retried" ;;
+  *) fail "max-age override: hash not retried (claim args: $(claim_args))" ;;
+esac
+if pending_has 0xwide001; then ok "max-age override: hash kept pending"; else fail "max-age override: hash dropped despite the override"; fi
+
+# --- Test 19 (ZER-13): a new FLUSH_TX is recorded as "<hash>,<epoch>" ------
+new_state
+run_keeper STUB_FLUSH_TX=0xfmt999 STUB_CLAIM_EXIT=1
+LINE=$(head -n 1 "$PENDING")
+case "$LINE" in
+  0xfmt999,[0-9]*) ok "pending format: recorded as hash,epoch" ;;
+  *) fail "pending format: expected '0xfmt999,<epoch>', got '$LINE'" ;;
+esac
+
+# --- Test 20 (ZER-13): a hash that stays pending keeps its ORIGINAL epoch ---
+# Stamping it afresh on every rewrite would push the expiry window out of
+# reach and restore the retry-forever behaviour Test 15 fixes.
+new_state
+SEED_TS=$(( $(date +%s) - 7000 ))
+printf '%s,%s\n' 0xkeepts "$SEED_TS" > "$PENDING"
+run_keeper STUB_FLUSH_TX="" STUB_CLAIM_EXIT=1
+if [ "$(cat "$PENDING")" = "0xkeepts,$SEED_TS" ]; then
+  ok "pending timestamp: preserved across a failed retry"
+else
+  fail "pending timestamp: rewritten (expected '0xkeepts,$SEED_TS', got '$(cat "$PENDING")')"
+fi
 
 echo
 if [ "$FAILURES" -gt 0 ]; then
