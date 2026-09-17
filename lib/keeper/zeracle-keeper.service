@@ -27,13 +27,30 @@
 #     does not supply it. The fee custodian needs no on-chain deployment (it
 #     is an initializerless account).
 #
-# State: run-keeper.sh keeps un-relayed flush tx hashes in
-# $KEEPER_STATE_DIR/pending-flush (default /var/lib/zeracle-keeper) and
-# retries them on every run. StateDirectory= below has systemd create
-# /var/lib/zeracle-keeper owned by User=. Message proofs are served for
-# roughly 2 h only, so with a weekly timer the in-run claim wait
-# (KEEPER_CLAIM_WAIT_SECS, default 5400) is what covers slow epoch proving.
-# Type=oneshot has no start timeout by default, so a long wait is not killed.
+# State: run-keeper.sh keeps un-relayed flush txs in
+# $KEEPER_STATE_DIR/pending-flush (default /var/lib/zeracle-keeper), one
+# "<l2 flush tx hash>,<unix epoch seconds>" line each, and retries them on
+# every run. StateDirectory= below has systemd create /var/lib/zeracle-keeper
+# owned by User=. Message proofs are served for roughly 2 h only, so with a
+# weekly timer the in-run claim wait (KEEPER_CLAIM_WAIT_SECS, default 5400) is
+# what covers slow epoch proving. Type=oneshot has no start timeout by
+# default, so a long wait is not killed.
+#
+# A pending line older than PENDING_FLUSH_MAX_AGE_SECS (default 7200) can
+# never be claimed again, so it is dropped with an EXPIRED log line instead of
+# being retried forever. That is NOT counted as a step failure, so the unit
+# still exits 0: alerting on unrecoverable fee loss means watching the journal
+# for EXPIRED, not just the unit's exit status.
+#
+# The run also takes an exclusive, non-blocking flock on
+# $KEEPER_STATE_DIR/lock, so a manual run started while the timer's run is in
+# flight aborts immediately instead of corrupting pending-flush. flock
+# (util-linux) must therefore resolve on the PATH below.
+#
+# UPGRADING from a pre-ZER-13 keeper: the old pending-flush had no timestamps,
+# and the first run after the upgrade expires every undated line in it. Relay
+# anything already in that file by hand BEFORE upgrading — see run-keeper.sh's
+# header.
 [Unit]
 Description=Zeracle fee keeper (D-b): sweep, flush, relay, convert, cushion
 Wants=network-online.target
