@@ -11,6 +11,13 @@
 */deployer-account.json
 **/.env.local
 
+# ZER-11: the deployer's in-flight fee-juice claim sidecar, written next to
+# DEPLOYER_ACCOUNT_FILE before the L1 bridge send. It holds the claim SECRET
+# (a bearer token for the bridged fee-asset), so it must never be committed —
+# and `*/deployer-account.json` above does NOT match the `.pending-claim.json`
+# sibling.
+*.pending-claim.json
+
 # Release tarballs are build output. devops make-release-tarball.sh writes them
 # to <zeracle root>/dist/ since 2026-09-13; a committed one leaked the sandbox
 # attestor key (readiness review S1).
