@@ -65,18 +65,18 @@ pkill -f "scripts/trigger-l2-block.ts" 2>/dev/null || true
 docker ps -q | xargs -r docker inspect --format '{{.Id}} {{.Config.Image}}' 2>/dev/null | grep "aztecprotocol/aztec" | awk '{print $1}' | xargs -r docker stop 2>/dev/null && ok "Aztec container stopped" || ok "No Aztec container running"
 wait_for_port_free 8080 "Aztec Sandbox"
 
-# Anvil (plain or mainnet-forked — `-x` matches the process NAME, so the fork flags
-# on the cmdline are irrelevant either way).
-#
-# ZER-15: this was `pkill -f "anvil"`, which matches the pattern against every
-# process's FULL command line and so killed the shell running this script whenever
-# that shell's own cmdline happened to contain "anvil" (a wrapper command, an alias,
-# a CI step string) — observed as an abrupt exit 144 mid-script. Measured on a real
-# anvil: `pgrep -f anvil` matched 3 processes (anvil plus two bystanders) where
-# `pgrep -x anvil` matched exactly 1. `anvil` is 5 chars, well under the 15-char
-# `comm` truncation that would make `-x` unsafe for a longer binary name.
-pkill -x anvil 2>/dev/null && ok "Anvil stopped" || ok "Anvil not running"
+# Anvil (plain or mainnet-forked — `-x` matches the process NAME, so cmdline flags
+# are irrelevant). ZER-15: was `pkill -f "anvil"`, which matches the FULL cmdline and
+# so killed the invoking shell whenever its own cmdline mentioned "anvil". `-x` is safe
+# here because anvil's comm is exactly "anvil" (5 chars, under the 15-char comm
+# truncation that makes `-x` unusable for longer binary names).
+pkill -x "anvil" 2>/dev/null && ok "Anvil stopped" || ok "Anvil not running"
 wait_for_port_free 8545 "Anvil"
+# The whole fix rests on that comm still being "anvil". Say so out loud if it ever
+# stops matching, rather than reporting "All services stopped" over a live chain.
+if pgrep -x anvil >/dev/null 2>&1; then
+  warn "anvil is STILL running after pkill -x — has its process name changed? (ps -o comm= -p \$(pgrep -f anvil | head -1))"
+fi
 
 if [ "$CLEAN_LOGS" = true ]; then
   rm -f /tmp/zeracle-anvil.log /tmp/zeracle-sandbox.log /tmp/zeracle-block-producer.log
