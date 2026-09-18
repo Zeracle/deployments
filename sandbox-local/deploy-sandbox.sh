@@ -155,7 +155,10 @@ wait_for_port() {
 if [ "$SKIP_INFRA" = false ]; then
   # Stop any existing instances
   step "Stopping existing services..."
-  pkill -f "anvil" 2>/dev/null || true
+  # ZER-15: `-x` (exact process name), not `-f` (full cmdline substring) — the
+  # latter also matched the invoking shell when its own cmdline mentioned "anvil".
+  # Same fix as stop-sandbox.sh, which carries the full reasoning.
+  pkill -x anvil 2>/dev/null || true
   (cd "$L2_DIR" && docker-compose -f docker-compose.local.yml down -v 2>/dev/null) || true
   sleep 2
 
