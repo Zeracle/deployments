@@ -48,13 +48,37 @@ fi
 #    after `make wire-bridge-testnet` has already spent the one-shot call is no
 #    better than no assert at all.
 strip_comments() { grep -vE '^[0-9]+:[[:space:]]*#'; }
-CALL_LINE=$(grep -nE "^[[:space:]]*$FN[[:space:]]" "$SCRIPT" | strip_comments | head -1 | cut -d: -f1 || true)
+# The WHOLE call line, and exactly one of them. Matching the bare identifier
+# was not enough: a tautological argument
+# (`$FN "$(jq -r .bridge.l1Portal deployment.json)"`, which compares the value
+# to itself and can never fail) and a `[ "${SKIP:-}" != 1 ] && ...` bypass both
+# satisfied that looser form. This is still a TEXTUAL guard -- it cannot stop
+# someone hoisting the call into a function that is never reached -- but it
+# closes the two edits a maintainer actually makes under deploy pressure.
+# Exactly two spaces, not `[[:space:]]*`: that is function-body top level
+# throughout this file, so anything more means the call has been nested inside
+# a conditional -- `if [ "${SKIP_T6_CHECK:-}" != 1 ]; then ...` is the edit this
+# is here to refuse, and it is otherwise indistinguishable from the real thing.
+CALL_LINES=$(grep -nE '^  '"$FN"'[[:space:]]+"\$TOKEN_PORTAL"[[:space:]]*$' "$SCRIPT" | strip_comments || true)
+CALL_COUNT=$(printf '%s' "$CALL_LINES" | grep -c . || true)
+if [ "$CALL_COUNT" != "1" ]; then
+  echo "FAIL: expected exactly one call, at function-body indentation, of the form:"
+  echo "          $FN \"\$TOKEN_PORTAL\""
+  echo "      found $CALL_COUNT. Stage 1's portal must reach the assert unmodified,"
+  echo "      on a line of its own and unconditionally, so nothing can route around it."
+  exit 1
+fi
+CALL_LINE=$(printf '%s\n' "$CALL_LINES" | head -1 | cut -d: -f1)
 # Matched in COMMAND position (`make ... wire-bridge-testnet`), not anywhere the
 # string appears: the assert's own failure messages name the target in prose, and
 # matching those would compare the assert against itself.
-WIRE_LINE=$(grep -nE '^[[:space:]]*make[[:space:]].*wire-bridge-testnet[[:space:]]*$' "$SCRIPT" | strip_comments | head -1 | cut -d: -f1 || true)
-[ -n "$CALL_LINE" ] || { echo "FAIL: $FN is defined but never called."; exit 1; }
-[ -n "$WIRE_LINE" ] || { echo "FAIL: no 'make ... wire-bridge-testnet' invocation found in deploy-testnet.sh."; exit 1; }
+# In command position, but NOT requiring `make` at line start: collapsing the
+# env prefix onto one line (`ETH_RPC_URL=... make -C ... wire-bridge-testnet`)
+# is a benign refactor, and a guard that fails on correct code gets deleted.
+# Requiring the target to END the line is what keeps the assert's own prose --
+# which names the target three times mid-sentence -- from matching.
+WIRE_LINE=$(grep -nE 'wire-bridge-testnet[[:space:]]*$' "$SCRIPT" | strip_comments | head -1 | cut -d: -f1 || true)
+[ -n "$WIRE_LINE" ] || { echo "FAIL: no wire-bridge-testnet invocation found in deploy-testnet.sh."; exit 1; }
 if [ "$CALL_LINE" -ge "$WIRE_LINE" ]; then
   echo "FAIL: $FN is called at line $CALL_LINE, at or after the"
   echo "      wire-bridge-testnet step at line $WIRE_LINE. The assert exists to stop"
@@ -69,19 +93,29 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-PORTAL_LC="0x$(printf '5%.0s' $(seq 40))"
-PORTAL_UC=$(echo "$PORTAL_LC" | tr '[:lower:]' '[:upper:]' | sed 's/^0X/0x/')
+# MUST contain letters. An all-digit fixture makes the upper/lower pair
+# byte-identical, which silently turns the two casing cases below into
+# duplicates of the first and leaves the lowercasing in the assert untested --
+# a mutant that drops `tr` then survives the whole suite.
+PORTAL_LC="0xabcdef0123456789abcdef0123456789abcdef01"
+PORTAL_UC="0xABCDEF0123456789ABCDEF0123456789ABCDEF01"
 ZERO="0x$(printf '0%.0s' $(seq 40))"
 
-# Runs the assert with deployment.json holding $1 as .contracts.tokenBridgePortal
+# Runs the assert with deployment.json holding $1 as .bridge.l1Portal
 # (the literal "OMIT" writes the file without the field at all) and $2 as the
 # Stage 1 TokenPortal. Echoes "PASS" or "FAIL:<message>".
 run_case() {
   local recorded="$1" expected="$2"
   if [ "$recorded" = "OMIT" ]; then
     printf '{"contracts":{"tokenBridge":"0xabc"}}' > "$WORK/deployment.json"
+  elif [ "$recorded" = "JSONNULL" ]; then
+    # Unquoted JSON null, which is what a writer that recorded "no portal"
+    # emits -- distinct from the STRING "null" tested below.
+    printf '{"bridge":{"l1Portal":null}}' > "$WORK/deployment.json"
+  elif [ "$recorded" = "BADJSON" ]; then
+    printf '{"bridge": {' > "$WORK/deployment.json"
   else
-    printf '{"contracts":{"tokenBridge":"0xabc","tokenBridgePortal":"%s"}}' "$recorded" \
+    printf '{"contracts":{"tokenBridge":"0xabc"},"bridge":{"l1Portal":"%s"}}' "$recorded" \
       > "$WORK/deployment.json"
   fi
   (
@@ -90,7 +124,10 @@ run_case() {
     ok()   { :; }
     step() { :; }
     eval "$FN_SRC"
-    "$FN" "$expected" && echo "PASS"
+    # NOT `"$FN" ... && echo PASS`: putting the call on the left of && disables
+    # errexit for its whole body, so a future edit that fails a command instead
+    # of calling fail() would be invisible here while aborting a real deploy.
+    if "$FN" "$expected"; then echo "PASS"; fi
   ) 2>&1
 }
 
@@ -140,9 +177,23 @@ expect_fail "zero portal accepted" "$ZERO" "$PORTAL_LC" "ZERO L1 portal"
 expect_fail "mismatched portal accepted" "0x$(printf '6%.0s' $(seq 40))" "$PORTAL_LC" "but Stage 1 deployed TokenPortal at"
 
 # e. deployment.json written by a v1-l2 that predates the T6 fix: no field at
-#    all. jq prints "null" for a missing key, which must not read as a match.
-expect_fail "missing tokenBridgePortal accepted" "OMIT" "$PORTAL_LC" "has no .contracts.tokenBridgePortal"
-expect_fail "null tokenBridgePortal accepted" "null" "$PORTAL_LC" "has no .contracts.tokenBridgePortal"
-expect_fail "empty tokenBridgePortal accepted" "" "$PORTAL_LC" "has no .contracts.tokenBridgePortal"
+#    all. `jq '// ""'` turns both a missing key and a JSON null into the empty
+#    string, so all three land in the same branch -- tested separately because
+#    only the first is realistic, and the guard's own `= "null"` half is
+#    otherwise unreachable defensive code.
+expect_fail "missing .bridge.l1Portal accepted" "OMIT" "$PORTAL_LC" "has no .bridge.l1Portal"
+expect_fail "JSON null l1Portal accepted" "JSONNULL" "$PORTAL_LC" "has no .bridge.l1Portal"
+expect_fail "the string \"null\" accepted" "null" "$PORTAL_LC" "has no .bridge.l1Portal"
+expect_fail "empty l1Portal accepted" "" "$PORTAL_LC" "has no .bridge.l1Portal"
 
-echo "deploy-testnet bridge-portal assert: ok (7 cases)"
+# f. Stage 1's side. An empty or null TOKEN_PORTAL means deploy-bridge-testnet
+#    never recorded a portal; reporting that as an L2 mismatch sends the
+#    operator hunting a stale rerun when the fault is a stage earlier.
+expect_fail "empty Stage 1 portal reported as an L2 mismatch" "$PORTAL_LC" "" "STAGE 1 failure"
+expect_fail "null Stage 1 portal reported as an L2 mismatch" "$PORTAL_LC" "null" "STAGE 1 failure"
+
+# g. A deployment.json that is not valid JSON at all: a named failure, not a
+#    raw jq parse error mid-deploy.
+expect_fail "malformed deployment.json accepted" "BADJSON" "$PORTAL_LC" "not valid JSON"
+
+echo "deploy-testnet bridge-portal assert: ok (12 cases)"

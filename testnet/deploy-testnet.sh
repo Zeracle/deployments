@@ -522,6 +522,12 @@ stage_l1_deploy() {
     make deploy-bridge-testnet
   [ -f deployments/bridge-testnet.json ] || fail "v1-l1/deployments/bridge-testnet.json was not created by 'make deploy-bridge-testnet'. Check the forge output above for the actual failure."
   TOKEN_PORTAL=$(jq -r '.tokenPortal' deployments/bridge-testnet.json)
+  # Checked here, not just where it is consumed: Stage 2 passes this straight into
+  # `yarn deploy:clean` as L1_TOKEN_PORTAL, and a literal "null" would deploy an
+  # unusable bridge after spending L2 gas. v1-l1/Makefile guards it the same way.
+  { [ -n "$TOKEN_PORTAL" ] && [ "$TOKEN_PORTAL" != "null" ]; } \
+    || fail "deployments/bridge-testnet.json has no .tokenPortal — 'make deploy-bridge-testnet' did not record the TokenPortal address. Nothing downstream can be wired without it."
+
   ok "TokenPortal: $TOKEN_PORTAL"
   # Not wired to an L2 TokenBridge yet — the L2 TokenBridge doesn't exist
   # until stage_l2_deploy runs. Wiring happens there (see wire-bridge-testnet
@@ -570,7 +576,8 @@ stage_l1_deploy() {
 # The post-wire asserts below check the L1 side only (TokenPortal.l2Bridge()),
 # which a zero-portal bridge passes happily. This runs first, and reads the
 # portal the bridge was actually CONSTRUCTED with, as recorded in
-# deployment.json by scripts/deploy.ts.
+# deployment.json's `bridge.l1Portal` by scripts/deploy.ts -- the same block
+# redeploy-bridge.ts rewrites, so the two writers cannot drift apart.
 #
 # Reads deployment.json from the current directory (stage_l2_deploy has already
 # cd'd to $L2_DIR). $1 is Stage 1's TokenPortal address.
@@ -578,10 +585,22 @@ stage_l1_deploy() {
 assert_bridge_portal_matches() {
   local expected="$1"
   local recorded
-  recorded=$(jq -r '.contracts.tokenBridgePortal // ""' deployment.json)
+
+  # Stage 1's side first. TOKEN_PORTAL is read straight out of bridge-testnet.json
+  # with no validation, so an empty or null value here means Stage 1 never produced
+  # a portal -- and reporting that as an L2 mismatch would send the operator hunting
+  # a stale rerun when the fault is upstream.
+  if [ -z "$expected" ] || [ "$expected" = "null" ]; then
+    fail "Stage 1 produced no TokenPortal address (v1-l1/deployments/bridge-testnet.json .tokenPortal is empty or null), so the L2 bridge's pairing cannot be checked. This is a STAGE 1 failure, not an L2 one -- re-read the 'make deploy-bridge-testnet' output above."
+  fi
+
+  jq -e . deployment.json >/dev/null 2>&1 \
+    || fail "v1-l2/deployment.json is not valid JSON. 'yarn deploy:clean' reported success but left a file that cannot be read, so nothing downstream can be trusted."
+
+  recorded=$(jq -r '.bridge.l1Portal // ""' deployment.json)
 
   if [ -z "$recorded" ] || [ "$recorded" = "null" ]; then
-    fail "v1-l2/deployment.json has no .contracts.tokenBridgePortal. The L2 bridge deploy did not record the L1 portal it was constructed with, so there is no way to tell whether it is paired to $expected or to nothing at all. This field is written by v1-l2/scripts/deploy.ts (ZER-27 T6) -- deploying from a v1-l2 that predates it is not supported on a live network."
+    fail "v1-l2/deployment.json has no .bridge.l1Portal. The L2 bridge deploy did not record the L1 portal it was constructed with, so there is no way to tell whether it is paired to $expected or to nothing at all. This field is written by v1-l2/scripts/deploy.ts (ZER-27 T6) -- deploying from a v1-l2 that predates it is not supported on a live network."
   fi
 
   local recorded_lc expected_lc
@@ -704,7 +723,7 @@ stage_governance_handover() {
     AUTH=$(jq -r '.authority // ""' deployments/governance-testnet.json 2>/dev/null || true)
     CODE=$(cast code "$AUTH" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
     if [ -n "$AUTH" ] && [ "$CODE" != "0x" ]; then
-      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployGovernance.s.sol:DeployGovernance --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployGovernance.s.sol:DeployGovernance --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
     else
       fail "make deploy-governance-testnet failed before the broadcast landed (no code at the authority address). Check the forge output above; to resume a partial handover set GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR."
     fi
@@ -769,7 +788,7 @@ stage_basket_manager() {
     BM=$(jq -r '.basketManager // ""' deployments/basket-testnet.json 2>/dev/null || true)
     BM_CODE=$(cast code "$BM" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
     if [ -n "$BM" ] && [ "$BM_CODE" != "0x" ]; then
-      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
       warn "NOTE on --libraries: BasketManager needs NONE (it only reads compile-time constants from BasketCompositionLib), so a library flag will not fix a failure here. The LiquidityPool IMPLEMENTATION is the contract that does need --libraries, and the usual cause of ITS verification failing is a STALE basketCompositionLib: the link is per-implementation, so a UUPS upgrade redeploys the implementation and may relink it against a newly deployed library, leaving the recorded value describing a library the live pool no longer uses. Nothing asserts that value is current — re-read the link target Upgrade.s.sol logs after every upgrade and refresh local-testnet.json + the manifest before verifying."
     else
       fail "make deploy-basket-manager-testnet failed before the broadcast landed (no code at the manager address). Check the forge output above; to resume a partial wiring set BASKET_MANAGER to the manager this run deployed."
