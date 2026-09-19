@@ -558,6 +558,47 @@ stage_l1_deploy() {
 # pointed at deployments/bridge-testnet.json.
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# ZER-27 (T6): prove the L2 bridge is paired to Stage 1's L1 TokenPortal.
+#
+# ZeracleBridge's `portal` is a PublicImmutable its constructor writes once
+# (v1-l2/contracts/zeracle-bridge/src/zeracle_bridge.nr). Deposits consume L1
+# messages from it and exits message it, so a bridge holding the wrong -- or a
+# zero -- portal is dead in both directions, and off-sandbox nothing can repair
+# it: redeploy-bridge.ts is only ever called by deploy-sandbox.sh.
+#
+# The post-wire asserts below check the L1 side only (TokenPortal.l2Bridge()),
+# which a zero-portal bridge passes happily. This runs first, and reads the
+# portal the bridge was actually CONSTRUCTED with, as recorded in
+# deployment.json by scripts/deploy.ts.
+#
+# Reads deployment.json from the current directory (stage_l2_deploy has already
+# cd'd to $L2_DIR). $1 is Stage 1's TokenPortal address.
+# ---------------------------------------------------------------------------
+assert_bridge_portal_matches() {
+  local expected="$1"
+  local recorded
+  recorded=$(jq -r '.contracts.tokenBridgePortal // ""' deployment.json)
+
+  if [ -z "$recorded" ] || [ "$recorded" = "null" ]; then
+    fail "v1-l2/deployment.json has no .contracts.tokenBridgePortal. The L2 bridge deploy did not record the L1 portal it was constructed with, so there is no way to tell whether it is paired to $expected or to nothing at all. This field is written by v1-l2/scripts/deploy.ts (ZER-27 T6) -- deploying from a v1-l2 that predates it is not supported on a live network."
+  fi
+
+  local recorded_lc expected_lc
+  recorded_lc=$(echo "$recorded" | tr '[:upper:]' '[:lower:]')
+  expected_lc=$(echo "$expected" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$recorded_lc" = "0x0000000000000000000000000000000000000000" ]; then
+    fail "The L2 bridge was deployed with a ZERO L1 portal. Its portal is a write-once PublicImmutable and there is no off-sandbox re-pairing path, so this bridge can never carry a deposit or an exit. Check that L1_TOKEN_PORTAL reached 'yarn deploy:clean' in Stage 2 above. Refusing to spend the one-shot wire-bridge-testnet call on it."
+  fi
+
+  if [ "$recorded_lc" != "$expected_lc" ]; then
+    fail "The L2 bridge was deployed against L1 portal $recorded, but Stage 1 deployed TokenPortal at $expected. The bridge's portal is immutable, so wiring this pair would produce a permanently one-sided bridge. Refusing to spend the one-shot wire-bridge-testnet call on it."
+  fi
+
+  ok "L2 bridge portal matches Stage 1 TokenPortal ($expected)"
+}
+
 stage_l2_deploy() {
   cd "$L2_DIR"
 
@@ -605,6 +646,8 @@ stage_l2_deploy() {
   ok "Deployer:        $(jq -r '.deployer' deployment.json)"
   ok "Deployer keys:   $DEPLOYER_ACCOUNT_FILE (BACK THIS UP — never commit/ship it)"
   ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; no on-chain deployment needed: initializerless, sweep pays via the sponsored FPC)"
+
+  assert_bridge_portal_matches "$TOKEN_PORTAL"
 
   step "L2: wiring L1 TokenPortal to the freshly deployed L2 TokenBridge..."
   L2_BRIDGE_ADDRESS=$(jq -r '.contracts.tokenBridge' deployment.json)
