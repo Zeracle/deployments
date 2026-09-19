@@ -46,11 +46,24 @@ SERVER_DIR="$ROOT_DIR/chain-server"
 # DEPLOYER_PRIVATE_KEY for the L2 fee-juice bridge step.
 # shellcheck source=lib/env-defaults.sh
 . "$SCRIPT_DIR/lib/env-defaults.sh"
-# ZER-50: ANVIL_ACCOUNT_COUNT + anvil_accounts_json live here so the --accounts
-# flag below and the manifest's "accounts" array cannot disagree again.
-. "$SCRIPT_DIR/../lib/anvil-accounts.sh"
 load_env_defaults "$SCRIPT_DIR/.env"
 load_env_defaults "$L1_DIR/.env.local"
+
+# ZER-50: ANVIL_ACCOUNT_COUNT + anvil_accounts_json live here so the --accounts
+# flag below and the manifest's "accounts" array cannot disagree again. Sourced
+# AFTER load_env_defaults: the helper's `:=` default would otherwise win over an
+# ANVIL_ACCOUNT_COUNT set in .env, which takes a file value only when the key is
+# still unset — so the documented knob would be silently ignored there.
+# shellcheck source=../lib/anvil-accounts.sh
+. "$SCRIPT_DIR/../lib/anvil-accounts.sh"
+
+# Validate the count NOW, before anvil starts and before any contract is
+# deployed. `set -e` cannot see a command-substitution failure inside the
+# manifest heredoc far below, so without this an unpublishable count writes
+# `"accounts": ,` — an unparseable manifest, produced after a full deploy, with
+# the script still exiting 0.
+anvil_accounts_json "$ANVIL_ACCOUNT_COUNT" >/dev/null \
+  || fail "ANVIL_ACCOUNT_COUNT=$ANVIL_ACCOUNT_COUNT is not a publishable account count"
 
 # Anvil default — used as a fallback so a fresh checkout works without any
 # manual env setup. Override via .env or v1-l1/.env.local for production.
@@ -644,15 +657,27 @@ fi
 
 step "Generating deployment manifest..."
 
-# ZER-50: refuse to publish accounts the node will not sign for. The static
-# wiring above keeps the flag and the array in step, but anvil could have been
-# started by something else (a resumed box, a hand-run command), so ask it.
-# Skipped with SKIP_INFRA, where this script did not start anvil and the count
-# is not ours to assert.
-if [ "$SKIP_INFRA" = false ]; then
-  anvil_assert_unlocked_matches "${ETH_RPC_URL:-http://localhost:8545}" "$ANVIL_ACCOUNT_COUNT" \
-    || fail "anvil's unlocked account count does not match ANVIL_ACCOUNT_COUNT"
-fi
+# Built here rather than inside the heredoc: a command substitution that fails
+# during heredoc expansion does not stop the script, so the assignment has to
+# happen where `set -e` can act on it. Piping would mask the status too (the
+# pipeline would report the last command's), hence jq's own indenting.
+# NO PIPE on this line: a pipeline reports the LAST command's status, so
+# `… | sed` would hide a failing anvil_accounts_json from `set -e` just as the
+# heredoc did. Capture first, indent second.
+ACCOUNTS_JSON=$(anvil_accounts_json "$ANVIL_ACCOUNT_COUNT")
+ACCOUNTS_JSON=$(printf '%s\n' "$ACCOUNTS_JSON" | sed '1!s/^/  /')
+
+# ZER-50: refuse to publish accounts the node will not sign for. Run
+# UNCONDITIONALLY — the earlier version gated this on `SKIP_INFRA = false`, i.e.
+# only when this script had just started anvil itself and the answer was nearly
+# tautological. The paths that need it are the opposite ones: `--skip-infra`, and
+# CHAIN_HOST_HEADLESS=1 (the EC2 box), where anvil was started by systemd. That
+# unit hardcodes its own `--accounts 5`
+# (devops/production/ec2/files/ops/systemd/anvil.service), a third copy of this
+# number that ANVIL_ACCOUNT_COUNT does not reach — so asking the node is the only
+# thing that catches a drift between them.
+anvil_assert_unlocked_matches "$ETH_RPC_URL" "$ANVIL_ACCOUNT_COUNT" \
+  || fail "anvil's unlocked account count does not match ANVIL_ACCOUNT_COUNT ($ANVIL_ACCOUNT_COUNT)"
 
 # Read all addresses
 L1_LOCAL="$L1_DIR/deployments/local.json"
@@ -671,7 +696,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "l2Pxe": "http://localhost:8080",
     "accountServer": "http://localhost:3001"
   },
-  "accounts": $(anvil_accounts_json "$ANVIL_ACCOUNT_COUNT" | sed 's/^/  /'),
+  "accounts": $ACCOUNTS_JSON,
   "l1": {
     "chainId": 31337,
     "contracts": {
