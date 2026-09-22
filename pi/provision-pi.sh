@@ -93,7 +93,8 @@ if ! command -v forge >/dev/null; then
   "$HOME/.foundry/bin/foundryup"
 fi
 export PATH="$HOME/.foundry/bin:$PATH"
-file "$(command -v anvil)" | grep -q aarch64 || fail "anvil is not a native aarch64 binary"
+# -L: foundryup symlinks bin/anvil -> versions/.../anvil, so follow to the real ELF.
+file -L "$(command -v anvil)" | grep -q aarch64 || fail "anvil is not a native aarch64 binary"
 ok "$(forge --version | head -1)"
 
 # Ruling: symlink into /usr/local/bin so the systemd units (base + drop-ins),
