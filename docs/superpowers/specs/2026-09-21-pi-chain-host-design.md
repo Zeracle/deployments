@@ -1,6 +1,6 @@
 # Raspberry Pi chain host — design and build spec
 
-**Status:** approved 2026-09-21 · revised 2026-09-22 (solc source build removed) · **Repo:** deployments
+**Status:** approved 2026-09-21 · revised 2026-09-22 (solc source build removed) · **built 2026-09-22 — see [As-built](#as-built--2026-09-22)** · **Repo:** deployments
 **Audience:** an implementing agent with physical or SSH access to the Pi.
 
 ## Objective
@@ -40,6 +40,8 @@ The Pi removes both ceilings: 4 cores at full speed indefinitely, 16 GB instead 
 
 3. **Private access only.** No Caddy, no public TLS, no tunnel. Services bind to loopback and the Tailscale/LAN interface.
 
+   > **REVERSED 2026-09-22 by the owner.** Public endpoints are served again, via Tailscale Funnel plus a JSON-RPC method allowlist. See [As-built](#as-built--2026-09-22).
+
    *Accepted consequence:* the public sandbox endpoints (`anvil.$DOMAIN`, `aztec.$DOMAIN`, `api.$DOMAIN`) stop being served, so `sandbox.zeracle.com`'s browser PXE has nothing to talk to. Re-homing that is a **separate ticket** — do not solve it here. Security-wise this is an improvement: a publicly reachable anvil with unlocked accounts was a standing exposure.
 
 4. **Systemd units are reused, not forked.** `devops/production/ec2/files/ops/systemd/` defines `anvil`, `aztec-sandbox`, `block-producer` and `chain-server`. Install them with drop-in overrides for paths, bind addresses and resource limits.
@@ -47,6 +49,9 @@ The Pi removes both ceilings: 4 cores at full speed indefinitely, 16 GB instead 
 5. **The Pi provisions a fresh chain.** EC2's persisted `/data` state is not migrated.
 
 ## Files to create
+
+> The as-built tree is larger than this — Funnel, the RPC allowlist proxy and the
+> env/manifest generators were added during the build. See [As-built](#as-built--2026-09-22).
 
 ```
 deployments/pi/
@@ -110,7 +115,7 @@ Mirrors `deploy-ec2.sh`: preflight, then hand off to `sandbox-local/install-mock
 | Toolchain | `forge --version`; `file $(which solc)` | both native AArch64 |
 | Compiler matches config | installed solc vs `foundry.toml` | identical versions |
 | Build | `FOUNDRY_PROFILE=deploy forge build --sizes` in `v1-l1` | no contract over EIP-170 |
-| End to end | `forge test` in `v1-l1` | **721/721** |
+| End to end | `forge test` in `v1-l1` | **721/721** (see the counting note in [As-built](#as-built--2026-09-22) — the summary line reads 716) |
 
 That last figure is the number to beat: it is what the same suite scores on x86 at solc 0.8.37. Anything less means something about the ARM toolchain differs and must be explained before the host is trusted.
 
@@ -120,6 +125,81 @@ That last figure is the number to beat: it is what the same suite scores on x86 
 - **`forge test` spawns no `solc` children once compilation finishes.** "No solc processes, low CPU" therefore looks identical to a stall. Judge progress by whether the output file is *growing*, not by the process tree. Misreading this cost a full compile cycle during the migration.
 - **When a test fails on an event or log mismatch, read the trace before theorising.** The mismatch is often downstream of a revert that the trace names outright.
 - **Never read `block.timestamp` across a `vm.warp`** in any test you touch — use `vm.getBlockTimestamp()`, including inside `_warp` helpers. Newer solc hoists the read. See commit `c79c96b` in `v1-l1`.
+
+## As-built — 2026-09-22
+
+Built and verified on the hardware. The design above stands as approved; this section
+records where the build departed from it and why. Each departure was an owner decision
+or a fact discovered on the box — none were silent.
+
+### Hardware
+
+| Design said | As built | Why |
+|---|---|---|
+| 16 GB RAM | **8 GB** (7.8 GiB reported) | Owner approved proceeding. Clears the ≥8 GB floor, and peak swap during the full `forge test` run was 56 MiB of 12 GiB — the ceiling was never approached. |
+| `/data` already mounted, NVMe-backed | **A directory on the NVMe root**, not a separate mount | Owner decision. The Pi is a single 931 GB NVMe partition; a second partition on the same disk buys isolation, not speed. Preflight now asserts the backing device is `nvme*` (and rejects `mmcblk*`) instead of asserting a mountpoint. No fstab data-volume entry; the swapfile entry is still written. |
+
+### Toolchain
+
+- **Node 22, pinned via `NODE_VERSION` in `pi.env`.** `chain-server`'s `@taceo/oprf-client@0.9.0` requires `node >= 22`; the deploy failed at `yarn install` under 20.
+- **`file -L` for the native-arch assertion.** foundryup 1.8 symlinks `~/.foundry/bin/anvil` to a versioned binary, so `file` without `-L` reports *"symbolic link"* and the check fails on a perfectly good toolchain.
+- **`node`/`npm`/`npx`/`yarn` symlinked into `/usr/local/bin`.** The shared `chain-server` unit hard-codes `ExecStart=/usr/bin/npm`, which does not exist when node comes from nvm, and `block-producer` shells out to `npx tsx`. A drop-in overrides the path — Decision 4 sanctions exactly this.
+
+### Delivery — not specified in the design
+
+- **`sync-to-pi.sh` reuses `make-release-tarball.sh`** rather than a hand-rolled rsync. A blanket `--exclude artifacts` silently dropped `v1-l2/artifacts` (which the headless deploy requires — there is no `aztec-nargo` on the box), `interfaces/packages/instant-pay-core/dist`, and `release-sources.json`. Reusing the tarball keeps the Pi and EC2 platform layers from drifting — the same rule `deploy-ec2.sh` states for the deploy logic.
+- **`gen-web-env.sh`** generates `interfaces/apps/web/.env.pi` and syncs the public manifest, so the ~40 addresses that change on every fresh chain are never hand-transcribed.
+
+### Decision 3 reversed — public endpoints are served again
+
+The design made the host private and deferred re-homing the public endpoints to a separate
+ticket. The owner asked for them back so the CloudFront frontend could reach the chain.
+
+- **Tailscale Funnel**, path-routed on :443 (`/anvil`, `/aztec`, `/api`). Funnel serves only
+  443/8443/10000, so one hostname per service is unavailable. The public name is
+  `<machine>.<tailnet>.ts.net`; the Route 53 domain **cannot** be CNAMEd onto it (cert mismatch).
+- **`rpc-proxy`** — a new service with no EC2 equivalent — fronts anvil on loopback and rejects
+  `anvil_*`, `evm_*`, `hardhat_*`, `debug_*`, `txpool_*` and `personal_*`, **including inside
+  batch requests**. On-box callers (chain-server's clearance keeper, block-producer) keep talking
+  to `127.0.0.1:8545` directly and bypass the filter.
+
+The exposure the design named — *"a publicly reachable anvil with unlocked accounts was a
+standing exposure"* — is therefore **mitigated rather than accepted**: the public endpoint
+serves normal `eth_*` traffic but cannot rewrite chain state.
+
+### Public manifest
+
+`deploy-sandbox.sh` hard-codes `PM_ENV_ID=sandbox-ec2` and builds endpoints as
+`https://anvil.$DOMAIN`. On the Pi that produced a manifest claiming to be the EC2 box with
+endpoints at `anvil.pi.local`, and the subdomain-per-service shape cannot express Funnel's path
+routing. Decision 1 forbids editing that script, so **`deploy-pi.sh` rewrites the identity and
+endpoints afterwards** from `PUBLIC_BASE_URL`, on both the first-run and resume paths,
+idempotently. `chain-view` gained a `pi` environment — in `ENV_IDS` **and** `SANDBOX_IDS`, since
+its manifest schema requires `env.kind` to agree with `SANDBOX_IDS` membership — and now
+defaults to it.
+
+### The 721 figure — read this before re-running the gate
+
+`forge test` on the Pi prints **`716 tests passed`**, and that is a pass, not a shortfall.
+Foundry's summary counts an invariant *suite* as a single test:
+`test/invariant/LiquidityPoolClamp.invariant.t.sol` contributes 1 to that total while actually
+running 6 `invariant_*` functions. Counting individual tests — the `[PASS] <name>` lines — gives
+**721, 0 failed**, matching x86 at the same commit (`c79c96b`).
+
+**Measure the gate with `grep -c '^\[PASS\] [A-Za-z_]'`, not the summary line.** Three separate
+wrong explanations were chased before this one; the summary total is the trap.
+
+### Other failures worth carrying forward
+
+- **`gen-chain-server-env.sh` needs `sudo`** — it writes root-owned `/etc/zeracle`. EC2 never
+  noticed because cloud-init runs as root; `deploy-pi.sh` runs as `admin` and aborted *after* the
+  contracts were already deployed.
+- **`tailscale serve`/`funnel` need `--yes`** or they prompt and hang forever over a non-TTY ssh
+  session — and they **exit 0 even when refused** ("Serve is not enabled on your tailnet"). So
+  `setup-funnel.sh` asserts the resulting config rather than trusting exit codes, for the same
+  reason the Error handling section gives for asserting a mountpoint instead of trusting
+  `mount -a`. The 1.x CLI also has no `funnel <port> on` form — `funnel <target>` takes the same
+  flags as `serve` and publishes that path.
 
 ## Out of scope
 
