@@ -131,7 +131,7 @@ sudo sed "s|@REPO@|$REPO|g" \
 # Drop-ins (templated ones get the same substitution).
 for u in anvil aztec-sandbox chain-server block-producer; do
   sudo mkdir -p "/etc/systemd/system/$u.service.d"
-  sudo sed "s|@DATA@|$DATA_MOUNT|g; s|@MAINNET@|$FORK_FLAGS|g; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g; s|@BLOCK_INTERVAL@|${BLOCK_PRODUCER_INTERVAL:-10}|g" \
+  sudo sed "s|@REPO@|$REPO|g; s|@DATA@|$DATA_MOUNT|g; s|@MAINNET@|$FORK_FLAGS|g; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g; s|@BLOCK_INTERVAL@|${BLOCK_PRODUCER_INTERVAL:-10}|g" \
     "$SCRIPT_DIR/systemd/$u.service.d/pi.conf" | sudo tee "/etc/systemd/system/$u.service.d/pi.conf" >/dev/null
 done
 # Pi-only unit with no EC2 equivalent: the public RPC method-allowlist proxy
