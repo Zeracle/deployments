@@ -56,6 +56,26 @@ creates) do not expect. Each privileged step inside the scripts (swapfile,
 individually prefixed with `sudo`, so the admin user only needs passwordless
 (or interactive) `sudo` rights, not a root shell.
 
+## Known limitation: an Aztec restart destroys the L2 chain
+
+`aztec-sandbox` runs `start --local-network`, which is a **bootstrap** mode: it
+re-bootstraps a fresh L2 chain on every start. `DATA_DIRECTORY` makes the node
+write to `/data/aztec`, but it does **not** make it resume from there.
+
+Verified 2026-09-22: with `/data/aztec` at 15 MB, `systemctl restart
+aztec-sandbox` took the chain from height 38 to genesis (height 4) and every
+deployed L2 contract was gone.
+
+**Consequences**
+- A reboot loses the L2 chain. L1 survives — anvil's `--state` genuinely persists.
+- Recovery: remove `/data/deployment-manifest.json` and re-run `deploy-pi.sh`
+  so it takes the first-run branch (~30 min).
+- Do not restart `aztec-sandbox` casually. Treat it as destroying L2.
+
+Real persistence needs the node run in a resuming mode rather than
+`--local-network`, with the L1 rollup contracts deployed once and the node
+syncing from L1. That is a separate piece of work.
+
 ## Day-2 ops
 
 - **Logs:** `journalctl -u anvil`, `journalctl -u aztec-sandbox`,
