@@ -1,107 +1,132 @@
-# Raspberry Pi chain host (design)
+# Raspberry Pi chain host — design and build spec
 
-**Status:** approved 2026-09-21 · **Repos:** deployments · **Supersedes:** the EC2 chain host for local use
+**Status:** approved 2026-09-21 · revised 2026-09-22 (solc source build removed) · **Repo:** deployments
+**Audience:** an implementing agent with physical or SSH access to the Pi.
 
 ## Objective
 
-Replace the EC2 chain host with a Raspberry Pi 5 (16 GB RAM, 1 TB NVMe) that runs **both** roles the EC2 box ran: the chain services (anvil, Aztec sandbox, block producer, chain-server) and the build toolchain (`forge build` / `forge test`).
+Stand up a Raspberry Pi 5 (16 GB RAM, 1 TB NVMe) as the Zeracle chain host, replacing the retired EC2 box. It runs **both** roles EC2 ran:
 
-### Why the EC2 host is being retired
+- **Chain services** — anvil, Aztec sandbox, block producer, chain-server
+- **Build host** — `forge build` / `forge test`
 
-It is a `t3.large` — burstable. Running anvil, Aztec and chain-server continuously kept it in permanent CPU-credit deficit. On 2026-09-20 the credit balance sat at **0.0** while utilisation held at 90–95%, throttling the box to baseline (~0.6 of a vCPU) under a `via_ir` compile at `optimizer_runs = 10000`. `sshd` could not complete a banner exchange. Credits only accrue *below* baseline, so it deadlocks: the compile needs credits, and credits need the compile to stop.
+## Why EC2 was retired
 
-This is structural, not a bad day. The 2026-09-18 rebuild hit the same class of failure for a different reason (no swapfile; `bootstrap.sh` documents "sshd could not complete a banner exchange for 2.5 h"). The Pi removes both the credit ceiling and the memory ceiling: 4 cores at full speed indefinitely, 16 GB instead of 8, NVMe instead of network-attached EBS.
+It was a `t3.large` — burstable. Running the chain services continuously kept it in permanent CPU-credit deficit. On 2026-09-20 its credit balance sat at **0.0** while utilisation held at 90–95%, throttling it to baseline (~0.6 of a vCPU) under a `via_ir` compile. `sshd` could not complete a banner exchange. Credits only accrue *below* baseline, so it deadlocks: the compile needs credits, and credits need the compile to stop.
 
-## Feasibility, verified 2026-09-20
+Structural, not a bad day. A separate 2026-09-18 rebuild hit the same symptom for a different reason — no swapfile — which `devops/production/ec2/files/ops/bootstrap.sh` documents as "sshd could not complete a banner exchange for 2.5 h".
 
-| Component | arm64 status | Consequence |
+The Pi removes both ceilings: 4 cores at full speed indefinitely, 16 GB instead of 8, NVMe instead of network-attached EBS.
+
+## Feasibility — verified, do not re-litigate
+
+| Component | arm64 status | How it was verified |
 |---|---|---|
-| Aztec `5.2.0` image | **published** (`linux/arm64` in the manifest list) | No change needed |
-| Foundry (forge/cast/anvil) | **native arm64 builds** | No change needed |
-| `solc 0.8.22` | **no official aarch64 binary** — `binaries.soliditylang.org/linux-aarch64/list.json` returns 404 (amd64 returns 200) | Must be built; see below |
-| `ethereum/solc:0.8.22` image | **amd64 only** — single-arch manifest, `architecture: amd64` | Usable only under emulation; rejected |
+| Aztec `5.2.0` image | **published** | `linux/arm64` present in the Docker manifest list |
+| Foundry (forge/cast/anvil) | **native arm64** | upstream ships aarch64 builds |
+| `solc` **≥ 0.8.31** | **official binary** | `solc-static-linux-arm` GitHub asset; ELF header `e_machine 0xB7` = AArch64 |
+| `solc` **≤ 0.8.30** | **none** | `binaries.soliditylang.org/linux-aarch64/list.json` → 404 (amd64 → 200) |
+| `ethereum/solc:0.8.22` image | **amd64 only** | single-arch manifest, `architecture: amd64` |
 
-solc is the one tool whose output *is* the product — it produces the bytecode that holds reserves — so its provenance matters more than any other component here.
+**This is why `v1-l1` was upgraded to solc 0.8.37** (commit `c79c96b`, verified 721/721 with contract sizes inside EIP-170). That upgrade removes the need to build solc on ARM at all.
+
+> **Revision note.** The 2026-09-21 version of this spec specified building solc 0.8.22 from source inside Docker, because no aarch64 binary exists for that version. The upgrade makes that unnecessary. `Dockerfile.solc`, the source build and the bytecode-equivalence check are **deleted from this design** — better provenance (an official binary, not one we built) and one less subsystem.
 
 ## Decisions
 
-1. **The Pi is a platform layer, not a third copy of the deploy logic.** `deployments/sandbox-ec2/deploy-ec2.sh` is 82 lines because the real work lives in `deployments/sandbox-local/deploy-sandbox.sh` (886 lines) and runs *on* the host. Its header states the rule: *"One copy of the sandbox deploy logic serves both environments so they cannot drift."* The Pi becomes a second platform layer under the same rule. `deploy-sandbox.sh` is not modified.
+1. **The Pi is a platform layer, not a third copy of the deploy logic.** `deployments/sandbox-ec2/deploy-ec2.sh` is 82 lines because the real work lives in `deployments/sandbox-local/deploy-sandbox.sh` (886 lines) and runs *on* the host. Its header states the rule: *"One copy of the sandbox deploy logic serves both environments so they cannot drift."* The Pi is a second platform layer under that rule. **Do not modify `deploy-sandbox.sh`.**
 
-2. **solc is built from official source, natively, inside Docker.** A `Dockerfile.solc` fetches the published 0.8.22 source tarball, verifies its checksum, and builds for arm64. The resulting binary is extracted to `/opt/zeracle/toolchain/` and invoked directly — **no container in the hot path**. Docker is the build environment only.
+2. **solc comes from the official GitHub release asset.** Pinned version, checksum recorded on first install. No source build, no Docker in the compile path.
 
-   Rejected: a third-party prebuilt aarch64 binary (unvetted provenance for the one tool where it matters most); emulated amd64 solc under qemu (2–10× penalty on the expensive path, plausibly leaving the Pi slower than the box being retired); building on the host (leaves a full C++ toolchain permanently installed on a machine that is also the chain host).
+3. **Private access only.** No Caddy, no public TLS, no tunnel. Services bind to loopback and the Tailscale/LAN interface.
 
-3. **`v1-l1` is not modified.** The compiler is wired in through the `FOUNDRY_SOLC` environment variable. `foundry.toml` keeps `solc_version = "0.8.22"` and the change stays contained to `deployments/`.
+   *Accepted consequence:* the public sandbox endpoints (`anvil.$DOMAIN`, `aztec.$DOMAIN`, `api.$DOMAIN`) stop being served, so `sandbox.zeracle.com`'s browser PXE has nothing to talk to. Re-homing that is a **separate ticket** — do not solve it here. Security-wise this is an improvement: a publicly reachable anvil with unlocked accounts was a standing exposure.
 
-4. **Private access only.** No Caddy, no public TLS, no tunnel. Services bind to loopback and the Tailscale/LAN interface. The Pi sits behind a residential connection whose address rotated twice within one hour on 2026-09-20, so public DNS would be unreliable regardless.
+4. **Systemd units are reused, not forked.** `devops/production/ec2/files/ops/systemd/` defines `anvil`, `aztec-sandbox`, `block-producer` and `chain-server`. Install them with drop-in overrides for paths, bind addresses and resource limits.
 
-   *Consequence, accepted by the owner:* the public sandbox endpoints (`anvil.$DOMAIN`, `aztec.$DOMAIN`, `api.$DOMAIN`) stop being served, so `sandbox.zeracle.com`'s browser PXE has nothing to talk to. Re-homing the public sandbox is a separate ticket. Security-wise this is a net improvement: a publicly reachable anvil with unlocked accounts was a standing exposure.
+5. **The Pi provisions a fresh chain.** EC2's persisted `/data` state is not migrated.
 
-5. **Systemd units are reused, not forked.** `devops/production/ec2/files/ops/systemd/` already defines `anvil`, `aztec-sandbox`, `block-producer` and `chain-server`. These are platform-neutral; the Pi installs them with drop-in overrides for paths, bind addresses and resource limits.
-
-## Architecture
+## Files to create
 
 ```
 deployments/pi/
   README.md                 runbook: hardware prereqs, first run, day-2 ops
   provision-pi.sh           one-time host setup; idempotent; runs ON the Pi
   deploy-pi.sh              thin wrapper -> sandbox-local/{install-mock-feeds,deploy-sandbox}.sh
-  verify-toolchain.sh       bytecode-equivalence check against official x86 solc
   toolchain/
-    Dockerfile.solc         official source -> native aarch64 solc
-    build-solc.sh           build, extract to /opt/zeracle/toolchain, idempotent
+    install-solc.sh         download + verify the official aarch64 binary
   systemd/
     *.conf                  drop-in overrides for the shared unit files
 ```
 
 ### `provision-pi.sh`
 
-Idempotent, and asserts before it acts. Preflight, all fatal:
+Idempotent — a second run must make no changes. Use the `step`/`ok`/`fail` helpers from `deploy-ec2.sh` so output matches the other platform layer, and `set -euo pipefail`.
 
-- `uname -m` is `aarch64`
-- `/data` is **already mounted** and backed by an NVMe device, not the SD card — the script asserts this and aborts; it does not partition, format or mount anything. Disk layout is a human decision made once, and a script that formats storage on a machine it has just met is not a trade worth making
-- RAM ≥ 8 GB
-- `vcgencmd get_throttled` reports clean
+**Preflight, all fatal, before anything is installed:**
 
-That last check is the Pi-specific one and it matters: undervoltage and thermal throttling reproduce *exactly* the symptom being escaped — a box that is up, accepting TCP, and too starved to finish an SSH handshake. An NVMe HAT plus four cores under sustained compile needs a genuine 5 V/5 A supply and active cooling; without them the migration buys nothing.
+| Assertion | Why |
+|---|---|
+| `uname -m` is `aarch64` | The whole toolchain choice depends on it |
+| `/data` **already mounted**, backed by NVMe, not the SD card | Assert only — do **not** partition, format or mount. Disk layout is a human decision |
+| RAM ≥ 8 GB | Below that, `via_ir` compiles thrash |
+| `vcgencmd get_throttled` reports clean | See below |
 
-Then, in order: swapfile **on `/data`, never root** (carrying ZER-47's lesson forward, where the guard existed only in notes that were never written and was lost on every instance replacement); Docker; Node and Yarn; native-arm64 Foundry; `toolchain/build-solc.sh`; systemd units and drop-ins.
+The throttle check is the Pi-specific one and it is load-bearing. Undervoltage and thermal throttling reproduce **exactly** the symptom being escaped — a host that is up, accepting TCP, and too starved to finish an SSH handshake. An NVMe HAT plus four cores under sustained compile needs a genuine 5 V/5 A supply and active cooling; without them the migration buys nothing.
 
-It does **not** deploy contracts. That is `deploy-sandbox.sh`'s job, unchanged.
+**Then, in order:**
 
-### `verify-toolchain.sh`
+1. **Swapfile on `/data`, never root.** Carries ZER-47's lesson forward — that guard existed only in notes that were never written, so it was lost on every instance replacement.
+2. Docker, Node, Yarn.
+3. Foundry (native arm64).
+4. `toolchain/install-solc.sh`.
+5. Systemd units plus drop-ins.
 
-Compiles a canonical contract with the self-built solc and diffs the **runtime bytecode** against a committed reference produced by the official amd64 binary.
+It does **not** deploy contracts. That is `deploy-sandbox.sh`'s job.
 
-solc output should be platform-independent for a given version and settings, but "should be" is not sufficient for a compiler that produces deployed contracts. If a from-source arm64 build ever diverges, this fails during provisioning rather than when a deployed contract fails source verification. Run as the last step of `provision-pi.sh` and available standalone.
+### `toolchain/install-solc.sh`
+
+Downloads `solc-static-linux-arm` for the pinned version from the Solidity GitHub release, verifies its SHA-256 against a value committed in this repo, and installs it to `/opt/zeracle/toolchain/solc-<version>`.
+
+- **Pinned version: `0.8.37`** — must match `v1-l1/foundry.toml`'s `solc_version`. If they drift, builds silently use a different compiler than CI and the deploy scripts expect. Assert equality and fail loudly if not.
+- Wire it in with the **`FOUNDRY_SOLC`** environment variable so `v1-l1` needs no change.
+- Upstream note: `ethereum/solidity` now redirects to **`argotorg/solidity`**; release assets download from there.
+- **Verify after install:** `forge build --use <path>` on one contract, and confirm `forge --version` and the solc binary both run natively (`file` reports AArch64, not an interpreter).
 
 ### `deploy-pi.sh`
 
-Mirrors `deploy-ec2.sh`: preflight, then hand off to `sandbox-local/install-mock-feeds.sh` followed by `sandbox-local/deploy-sandbox.sh` in headless mode. No contract logic of its own.
+Mirrors `deploy-ec2.sh`: preflight, then hand off to `sandbox-local/install-mock-feeds.sh` followed by `sandbox-local/deploy-sandbox.sh` headless. No contract logic of its own.
 
 ## Error handling
 
-`set -euo pipefail` throughout, with the `step`/`ok`/`fail` helpers already used by `deploy-ec2.sh` so output is consistent across platform layers.
-
-Failures are loud and specific, following `bootstrap.sh`'s precedent of asserting a mountpoint rather than trusting `mount -a`'s exit code: a wrong or missing `/data` must abort rather than silently fill the SD card, which is the Pi's equivalent of the root-volume exhaustion that hit EC2 twice.
+`set -euo pipefail` throughout. Failures loud and specific, following `bootstrap.sh`'s precedent of asserting a mountpoint rather than trusting `mount -a`'s exit code: a wrong or missing `/data` must abort rather than silently fill the SD card — the Pi's equivalent of the root-volume exhaustion that hit EC2 twice.
 
 ## Testing
 
-| Check | How |
-|---|---|
-| Shell correctness | `shellcheck` on every script |
-| Idempotency | `provision-pi.sh` run twice; the second run makes no changes |
-| Compiler provenance | `verify-toolchain.sh` bytecode diff against the committed x86 reference |
-| End to end | `forge test --match-path test/unit/BasketManagerTranche.t.sol` |
+| Check | How | Pass condition |
+|---|---|---|
+| Shell correctness | `shellcheck` on every script | no errors |
+| Idempotency | run `provision-pi.sh` twice | second run changes nothing |
+| Toolchain | `forge --version`; `file $(which solc)` | both native AArch64 |
+| Compiler matches config | installed solc vs `foundry.toml` | identical versions |
+| Build | `FOUNDRY_PROFILE=deploy forge build --sizes` in `v1-l1` | no contract over EIP-170 |
+| End to end | `forge test` in `v1-l1` | **721/721** |
 
-The last one is also the fastest signal that the migration worked: that suite executes in **938 ms** once compiled. Every bit of the pain on EC2 was compilation, not testing.
+That last figure is the number to beat: it is what the same suite scores on x86 at solc 0.8.37. Anything less means something about the ARM toolchain differs and must be explained before the host is trusted.
+
+## Guidance for whoever implements this
+
+- **The suite runs in seconds; compiling is what costs minutes.** On the retired host every painful wait was compilation. Set `FOUNDRY_PROFILE` to a 200-run profile for routine test runs and reserve the default 10,000-run profile for size and gas measurement.
+- **`forge test` spawns no `solc` children once compilation finishes.** "No solc processes, low CPU" therefore looks identical to a stall. Judge progress by whether the output file is *growing*, not by the process tree. Misreading this cost a full compile cycle during the migration.
+- **When a test fails on an event or log mismatch, read the trace before theorising.** The mismatch is often downstream of a revert that the trace names outright.
+- **Never read `block.timestamp` across a `vm.warp`** in any test you touch — use `vm.getBlockTimestamp()`, including inside `_warp` helpers. Newer solc hoists the read. See commit `c79c96b` in `v1-l1`.
 
 ## Out of scope
 
-- Re-homing the public sandbox endpoints (separate ticket; see Decision 4)
+- Re-homing the public sandbox endpoints (Decision 3)
 - Secrets handling beyond what `gen-chain-server-env.sh` already does
-- Migrating EC2's persisted `/data` state; the Pi provisions a fresh chain
+- Migrating EC2's persisted `/data` state
 
-## Open question
+## Open question for the owner
 
-`optimizer_runs = 10000` with `via_ir` is the default profile and is what made every EC2 compile expensive. Profiles at `200` already exist in `foundry.toml`. Routine test runs do not need size or gas fidelity, only the deploy and size-measurement paths do. Worth deciding whether the Pi's default should be the cheap profile — it is a `v1-l1` change, so it is noted here rather than made.
+`optimizer_runs = 10000` with `via_ir` is `v1-l1`'s default profile, and it is what made every EC2 compile expensive. Profiles at `200` already exist. Routine test runs need neither size nor gas fidelity. Whether the default should change is a `v1-l1` decision, so it is noted here rather than made.
