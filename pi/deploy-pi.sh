@@ -52,5 +52,32 @@ else
   sudo systemctl start chain-server block-producer
   ok "first-run deploy complete; manifest at $DATA_MOUNT"
 fi
+
+# deploy-sandbox.sh hard-codes the public manifest's identity and endpoints
+# for the EC2 shape (PM_ENV_ID=sandbox-ec2, https://anvil.$DOMAIN). Decision 1
+# forbids editing that script, so correct the result here — this is exactly
+# the platform-layer work deploy-pi.sh exists to do.
+#
+# Funnel routes by PATH on one host, which the anvil.$DOMAIN subdomain shape
+# cannot express, so the endpoints are rebuilt from PUBLIC_BASE_URL.
+PUB="$DATA_MOUNT/public-manifest.json"
+if [ -f "$PUB" ] && [ -n "${PUBLIC_BASE_URL:-}" ]; then
+  tmp="$(mktemp)"
+  jq --arg base "$PUBLIC_BASE_URL" '
+    .env.id = "pi"
+    | .env.label = "Sandbox (Pi)"
+    | .endpoints.l1Rpc = ($base + "/anvil")
+    | .endpoints.aztecNode = ($base + "/aztec")
+    | .endpoints.chainServer = ($base + "/api")
+  ' "$PUB" > "$tmp" || fail "failed to rewrite $PUB"
+  mv "$tmp" "$PUB"
+  # chain-view sources ../deployments/pi/public-manifest.json; keep a copy in
+  # the repo tree so gen-web-env.sh can pull it back to the laptop.
+  cp "$PUB" "$SCRIPT_DIR/public-manifest.json"
+  ok "public manifest rewritten for the Pi ($PUBLIC_BASE_URL)"
+elif [ -f "$PUB" ]; then
+  echo "  ! PUBLIC_BASE_URL unset — public manifest still carries EC2 endpoints"
+fi
+
 step "Status"; systemctl --no-pager --failed || true
 ok "deploy-pi complete"

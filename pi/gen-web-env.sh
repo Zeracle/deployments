@@ -91,5 +91,24 @@ if grep -q 'REPLACE-ME\.ts\.net' "$ENV_FILE"; then
   echo "NOTE: endpoints still contain REPLACE-ME.ts.net. Re-run with"
   echo "      --funnel-host <machine>.<tailnet>.ts.net once Funnel is up."
 fi
+# chain-view reads ../deployments/pi/public-manifest.json (see its
+# environments.config.json), so keep the repo copy in step with the Pi. It is
+# the Pi-corrected version: deploy-pi.sh rewrites the identity and endpoints
+# that deploy-sandbox.sh hard-codes for EC2.
+step "Syncing public manifest for chain-view"
+PUB_OUT="$SCRIPT_DIR/public-manifest.json"
+if ssh "$PI" 'cat /data/public-manifest.json' > "$PUB_OUT.tmp" 2>/dev/null && [ -s "$PUB_OUT.tmp" ]; then
+  PUB_ID="$(jq -r '.env.id' "$PUB_OUT.tmp")"
+  if [ "$PUB_ID" != "pi" ]; then
+    rm -f "$PUB_OUT.tmp"
+    fail "the Pi's public manifest still says env.id=\"$PUB_ID\" — re-run deploy-pi.sh with PUBLIC_BASE_URL set so it gets rewritten"
+  fi
+  mv "$PUB_OUT.tmp" "$PUB_OUT"
+  ok "public manifest synced ($(jq -r '.endpoints.l1Rpc' "$PUB_OUT"))"
+else
+  rm -f "$PUB_OUT.tmp"
+  echo "  ! could not read /data/public-manifest.json from $PI — chain-view copy not updated"
+fi
+
 echo ""
 echo "Wrote $ENV_FILE"
