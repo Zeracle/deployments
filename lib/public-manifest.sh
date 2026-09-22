@@ -183,8 +183,14 @@ jq -n \
         mockDexAggregator: ($L.mockDexAggregator | nn),
         feeAssetHandler: ($D.l1ContractAddresses.feeAssetHandler | nn)
       },
-      tokens: ([["LUSD",18],["USDT",6],["USDC",6],["DAI",18],["WETH",18],["WBTC",8],["PAXG",18],["PAXS",18]]
-               | map(select($T[.[0]] != null) | {key: .[0], value: {address: $T[.[0]], decimals: .[1]}})
+      # ZER-49 §3: the asset set is tokens.json's own `decimals` map (emitted by v1-l1's
+      # BasketTable), not a list repeated here. The literal below is the pre-crvUSD
+      # fallback for a tokens.json written by a v1-l1 older than ZER-49; it is what this
+      # line used to be, and it is the reason the published manifest carried eight tokens
+      # for a nine-token deployment once crvUSD landed.
+      tokens: (($T.decimals // {"LUSD":18,"USDT":6,"USDC":6,"DAI":18,"WETH":18,"WBTC":8,"PAXG":18,"PAXS":18})
+               | to_entries
+               | map(select($T[.key] != null) | {key: .key, value: {address: $T[.key], decimals: .value}})
                | from_entries),
       governance: {authority: $G.authority, timelock: $G.timelock, validator: $G.validator, admin: $G.admin,
                    guardian: $G.guardian, proposers: ([$G.proposer, $G.proposer2] | map(nn | nz) | map(select(. != null))),
