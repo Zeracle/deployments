@@ -104,6 +104,15 @@ sudo ln -sf "$HOME/.foundry/bin/anvil" /usr/local/bin/anvil
 sudo ln -sf "$HOME/.foundry/bin/cast" /usr/local/bin/cast
 sudo ln -sf "$HOME/.foundry/bin/forge" /usr/local/bin/forge
 ok "symlinked anvil/cast/forge into /usr/local/bin"
+# Node toolchain lives under nvm ($HOME); the chain-server/block-producer units
+# run as root with a minimal PATH that includes /usr/local/bin but not nvm.
+# Symlink node/npm/npx/yarn there so the units resolve them. Resolve absolute
+# paths via `command -v` (nvm.sh is already sourced above) so no version is baked in.
+for b in node npm npx yarn; do
+  p="$(command -v "$b" || true)"
+  [ -n "$p" ] && sudo ln -sf "$p" "/usr/local/bin/$b" || echo "  ! $b not found on PATH; unit may fail"
+done
+ok "symlinked node/npm/npx/yarn into /usr/local/bin"
 
 step "Pinned solc"
 SOLC_VERSION="$SOLC_VERSION" bash "$SCRIPT_DIR/toolchain/install-solc.sh"
