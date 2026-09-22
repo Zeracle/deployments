@@ -48,12 +48,24 @@ sudo tailscale serve --bg --yes --https=443 --set-path=/aztec http://127.0.0.1:8
   || fail "failed to set /aztec"
 sudo tailscale serve --bg --yes --https=443 --set-path=/api http://127.0.0.1:3001 \
   || fail "failed to set /api"
-ok "serve paths configured"
+# `tailscale serve` exits 0 even when it refuses (e.g. "Serve is not enabled on
+# your tailnet" + an enable URL), so the exit codes above prove nothing. Assert
+# the config actually landed — same reason bootstrap.sh asserts a mountpoint
+# rather than trusting `mount -a`.
+SERVE_STATUS="$(sudo tailscale serve status 2>&1 || true)"
+for p in /anvil /aztec /api; do
+  echo "$SERVE_STATUS" | grep -q -- "$p" \
+    || fail "serve path $p is not in 'tailscale serve status' — the tailnet likely needs Serve enabled (an enable URL was printed above)"
+done
+ok "serve paths configured and verified"
 
 step "Enabling Funnel on :443 (public)"
 sudo tailscale funnel --bg --yes --https=443 on \
   || fail "could not enable Funnel — the tailnet may need the 'funnel' node attribute in its ACL policy (tailscale prints an enable URL above)"
-ok "funnel on"
+FUNNEL_STATUS="$(sudo tailscale funnel status 2>&1 || true)"
+echo "$FUNNEL_STATUS" | grep -qi "funnel on\|https://" \
+  || fail "Funnel is not actually on — check the enable URL printed above"
+ok "funnel on and verified"
 
 step "Current config"
 sudo tailscale serve status || true
