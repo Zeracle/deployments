@@ -1,22 +1,36 @@
 #!/usr/bin/env bash
 # Push the zeracle tree to the Pi at /opt/zeracle. Run from the laptop.
+#
+# Uses the SAME release tarball EC2's cloud-init fetches
+# (devops/production/ec2/scripts/make-release-tarball.sh) rather than a
+# hand-rolled rsync, so the two platform layers cannot drift — the same rule
+# deploy-ec2.sh states for the deploy logic itself.
+#
+# This matters concretely: the tarball keeps precompiled v1-l2/{artifacts,target}
+# (headless deploy has no aztec-nargo on the box), ships
+# interfaces/packages/instant-pay-core WITH its built dist/ (v1-l2 depends on it
+# via file:), writes release-sources.json (lib/public-manifest.sh needs the shas
+# because .git is not shipped), stages ops/ (systemd units + helpers), and
+# applies the scoped secret excludes. A blanket "--exclude artifacts" rsync
+# silently breaks the first three.
 set -euo pipefail
+
 PI="${PI_HOST:-pi}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # zeracle root (deployments/pi -> ../..)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"   # deployments/pi -> zeracle root
 REMOTE=/opt/zeracle
-# SC2029: $REMOTE is intentionally expanded client-side (it's a fixed laptop-
-# side constant); only $(id -u)/$(id -g) are meant to run on the Pi, hence
-# the escaped \$( ).
-# shellcheck disable=SC2029
+TARBALL_SCRIPT="$ROOT/devops/production/ec2/scripts/make-release-tarball.sh"
+OUT="$ROOT/dist/zeracle-chain-pi.tar.gz"
+
+[ -f "$TARBALL_SCRIPT" ] || { echo "FATAL: tarball builder not found at $TARBALL_SCRIPT" >&2; exit 1; }
+
+echo "==> Building release tarball"
+bash "$TARBALL_SCRIPT" "$OUT"
+
+echo "==> Extracting to $PI:$REMOTE"
 ssh "$PI" "sudo mkdir -p $REMOTE && sudo chown \$(id -u):\$(id -g) $REMOTE"
-# Main tree. --delete keeps the Pi in sync; excludes keep it lean and safe.
-rsync -a --delete \
-  --exclude '.git' --exclude 'node_modules' --exclude 'artifacts' --exclude 'cache' \
-  --exclude 'dist' --exclude 'out' --exclude '**/.env' --exclude '**/.env.local' \
-  --include 'deployments/pi/toolchain/solc-*.sha256' \
-  --exclude 'deployments/pi/toolchain/solc-*' \
-  "$ROOT/v1-l1" "$ROOT/v1-l2" "$ROOT/chain-server" "$ROOT/deployments" \
-  "$ROOT/interfaces" "$PI:$REMOTE/"
-# Stage ops/ (systemd units + helpers) from the EC2 files dir.
-rsync -a --delete "$ROOT/devops/production/ec2/files/ops/" "$PI:$REMOTE/ops/"
-echo "Synced to $PI:$REMOTE"
+# Stream straight into place. Extraction overwrites tracked files and leaves
+# on-box-generated dirs (node_modules, toolchain/) alone, so it is re-runnable.
+ssh "$PI" "tar -C $REMOTE -xzf -" < "$OUT"
+
+echo "Synced $OUT -> $PI:$REMOTE"
