@@ -643,6 +643,27 @@ step "Wiping stale PXE/wallet LMDB state..."
 # pxe_data_*/wallet_data_* — wipe both layouts.
 rm -rf "$SERVER_DIR"/pxe_data_* "$SERVER_DIR"/wallet_data_* "$SERVER_DIR"/aztec-wallet-data \
        "$L2_DIR"/pxe_data_*   "$L2_DIR"/wallet_data_*   "$L2_DIR"/aztec-wallet-data 2>/dev/null || true
+# ASSERT the wipe. `rm -rf ... 2>/dev/null || true` cannot fail, so a store this user
+# does not own survived it in silence while the step reported success. That is not a
+# cosmetic lie: chain-server then dies at startup with
+#
+#     libc++abi: terminating due to uncaught exception of type std::runtime_error:
+#     mdb_env_open: 13 - Permission denied
+#
+# and restart-loops forever. block-producer carries `Requires=chain-server.service`, so
+# systemd stops and restarts IT on every one of those cycles — roughly every 15 seconds,
+# faster than one trigger takes — and the L2 chain stops advancing entirely. The visible
+# symptom is a frozen L2 height, several layers away from a deploy that said it was fine.
+#
+# Deliberately NOT fixed with sudo: this script runs unprivileged by design. A root-owned
+# store means something ran as root that should not have, and the operator needs to know.
+for stale in "$SERVER_DIR"/aztec-wallet-data "$L2_DIR"/aztec-wallet-data; do
+  [ -e "$stale" ] || continue
+  fail "could not remove $stale (owner: $(stat -c '%U:%G' "$stale")). It is owned by another
+       user, so chain-server — which runs as $(id -un) — will crash-loop on
+       'mdb_env_open: 13 - Permission denied' and take block-producer down with it.
+       Remove it with elevated privileges and re-run:  sudo rm -rf $stale"
+done
 ok "Stale PXE state cleared"
 
 # ===========================================================================

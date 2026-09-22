@@ -21,6 +21,25 @@ step "JS deps (node_modules excluded from sync)"
 ( cd "$REPO/chain-server" && yarn install --frozen-lockfile ) || fail "chain-server yarn install failed"
 ok "deps installed"
 
+# The embedded wallet's LMDB stores must be owned by the service user. The `pi.conf`
+# drop-ins set `User=admin` precisely so new artefacts land admin-owned, but a store
+# created before those landed — or by anything run under sudo — stays root-owned, and
+# deploy-sandbox.sh runs unprivileged and cannot remove it. chain-server then crash-loops
+# on `mdb_env_open: 13 - Permission denied`, and block-producer's
+# `Requires=chain-server.service` restarts it on every cycle, so the L2 chain stops
+# advancing while every service still reports active.
+#
+# This is the platform layer, and it has sudo, so clear them here before the deploy sees
+# them. deploy-sandbox.sh now also ASSERTS its own wipe, so if one reappears the deploy
+# stops there instead of shipping a chain whose L2 never moves.
+step "Clearing stale embedded-wallet LMDB stores"
+for stale in "$REPO/chain-server/aztec-wallet-data" "$REPO/v1-l2/aztec-wallet-data"; do
+  if [ -e "$stale" ]; then
+    sudo rm -rf "$stale" && echo "  removed $stale"
+  fi
+done
+ok "no stale wallet stores"
+
 step "Bring up chain + deploy (once) or resume"
 sudo systemctl reset-failed anvil aztec-sandbox chain-server block-producer 2>/dev/null || true
 if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
