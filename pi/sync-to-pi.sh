@@ -28,9 +28,11 @@ echo "==> Building release tarball"
 bash "$TARBALL_SCRIPT" "$OUT"
 
 echo "==> Extracting to $PI:$REMOTE"
+# shellcheck disable=SC2029  # $REMOTE is a local constant; client-side expansion is intended
 ssh "$PI" "sudo mkdir -p $REMOTE && sudo chown \$(id -u):\$(id -g) $REMOTE"
 # Stream straight into place. Extraction overwrites tracked files and leaves
 # on-box-generated dirs (node_modules, toolchain/) alone, so it is re-runnable.
+# shellcheck disable=SC2029  # same: $REMOTE expands locally by design
 ssh "$PI" "tar -C $REMOTE -xzf -" < "$OUT"
 
 echo "Synced $OUT -> $PI:$REMOTE"
