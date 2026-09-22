@@ -81,7 +81,8 @@ if [ ! -s "$NVM_DIR/nvm.sh" ]; then
 fi
 # shellcheck disable=SC1091
 . "$NVM_DIR/nvm.sh"
-nvm install 20 >/dev/null; nvm alias default 20 >/dev/null
+nvm install "${NODE_VERSION:-22}" >/dev/null; nvm alias default "${NODE_VERSION:-22}" >/dev/null
+nvm use default >/dev/null
 corepack enable >/dev/null 2>&1 || npm i -g yarn >/dev/null
 ok "node $(node -v), yarn $(yarn -v 2>/dev/null || echo '?')"
 
