@@ -183,8 +183,19 @@ jq -n \
         mockDexAggregator: ($L.mockDexAggregator | nn),
         feeAssetHandler: ($D.l1ContractAddresses.feeAssetHandler | nn)
       },
-      tokens: ([["LUSD",18],["USDT",6],["USDC",6],["DAI",18],["WETH",18],["WBTC",8],["PAXG",18],["PAXS",18]]
-               | map(select($T[.[0]] != null) | {key: .[0], value: {address: $T[.[0]], decimals: .[1]}})
+      # ZER-49 section 3: the asset set comes from the `decimals` map in tokens.json,
+      # emitted by BasketTable in v1-l1, not from a list repeated here. The literal below
+      # is the pre-crvUSD fallback, for a tokens.json written by a v1-l1 older than
+      # ZER-49. It is what this line used to be, and it is why the published manifest
+      # carried eight tokens for a nine-token deployment once crvUSD landed.
+      #
+      # NO APOSTROPHES IN THIS BLOCK. The whole jq program is one single-quoted shell
+      # string, so an apostrophe inside a jq comment CLOSES it and the rest of the line
+      # becomes shell syntax. That is a deploy-time `syntax error near unexpected token`,
+      # not a jq error, and it fires after every contract has already been deployed.
+      tokens: (($T.decimals // {"LUSD":18,"USDT":6,"USDC":6,"DAI":18,"WETH":18,"WBTC":8,"PAXG":18,"PAXS":18})
+               | to_entries
+               | map(select($T[.key] != null) | {key: .key, value: {address: $T[.key], decimals: .value}})
                | from_entries),
       governance: {authority: $G.authority, timelock: $G.timelock, validator: $G.validator, admin: $G.admin,
                    guardian: $G.guardian, proposers: ([$G.proposer, $G.proposer2] | map(nn | nz) | map(select(. != null))),

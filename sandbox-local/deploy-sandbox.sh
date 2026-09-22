@@ -549,6 +549,35 @@ WBTC=$(jq -r '.WBTC' "$L1_DIR/deployments/tokens.json")
 PAXG=$(jq -r '.PAXG' "$L1_DIR/deployments/tokens.json")
 PAXS=$(jq -r '.PAXS' "$L1_DIR/deployments/tokens.json")
 
+# ZER-49 §3: the asset SET comes from tokens.json's `decimals` map, which v1-l1's
+# BasketTable emits. It used to be a hand-written eight-symbol list repeated in three
+# places in this file (the .env.local block, the manifest's `tokens` object and the
+# manifest's `env` object) plus a fourth in lib/public-manifest.sh. None of the four was
+# widened when crvUSD became a 20% basket leg, so the deployed manifests named eight
+# tokens for a nine-token deployment and the frontends had no crvUSD address at all.
+#
+# The `//` fallback covers a v1-l1 older than ZER-49 (whose tokens.json has no `decimals`
+# map): the eight symbols that shipped before crvUSD, so a mismatched pair degrades to
+# the previous behaviour rather than emitting an empty token set.
+TOKEN_DECIMALS=$(jq -c '.decimals // {"LUSD":18,"USDT":6,"USDC":6,"DAI":18,"WETH":18,"WBTC":8,"PAXG":18,"PAXS":18}' \
+  "$L1_DIR/deployments/tokens.json")
+if ! jq -e '.decimals' "$L1_DIR/deployments/tokens.json" >/dev/null 2>&1; then
+  warn "tokens.json carries no .decimals map (pre-ZER-49 v1-l1) - using the legacy eight-token list"
+fi
+
+# `VITE_<SYM>_L1_ADDRESS=0x...` for the .env.local block, one line per token.
+TOKEN_ENV_LINES=$(jq -r --argjson d "$TOKEN_DECIMALS" \
+  '. as $t | $d | keys_unsorted[] | "VITE_\(. | ascii_upcase)_L1_ADDRESS=\($t[.])"' \
+  "$L1_DIR/deployments/tokens.json")
+# The same, as JSON object members for the manifest's `env` block.
+TOKEN_ENV_JSON=$(jq -r --argjson d "$TOKEN_DECIMALS" \
+  '. as $t | $d | keys_unsorted[] | "    \"VITE_\(. | ascii_upcase)_L1_ADDRESS\": \"\($t[.])\","' \
+  "$L1_DIR/deployments/tokens.json")
+# `{ "SYM": { "address": ..., "decimals": ... } }` for the manifest's `tokens` block.
+TOKEN_MANIFEST_BLOCK=$(jq -c --argjson d "$TOKEN_DECIMALS" \
+  '. as $t | reduce ($d | keys_unsorted[]) as $s ({}; .[$s] = {address: $t[$s], decimals: $d[$s]})' \
+  "$L1_DIR/deployments/tokens.json")
+
 # Chainlink USD feed addresses (FEED_*) are set at the price-feed stage above, where
 # they are also asserted against DepositAdapter.inputPriceFeeds. The web app needs them
 # because a non-basket deposit input (USDC/USDT) can only be priced through
@@ -583,14 +612,9 @@ VITE_COMPLIANCE_CONTRACT_ADDRESS=$COMPLIANCE
 VITE_COMPLIANCE_ENABLED=$COMPLIANCE_ENABLED
 
 # L1 Mock Tokens — the deposit (entry) list plus the withdrawal outputs.
-# LUSD doubles as the pool reserve / fee token.
-VITE_LUSD_L1_ADDRESS=$LUSD
-VITE_USDT_L1_ADDRESS=$USDT
-VITE_USDC_L1_ADDRESS=$USDC
-VITE_DAI_L1_ADDRESS=$DAI
-VITE_WETH_L1_ADDRESS=$WETH
-VITE_WBTC_L1_ADDRESS=$WBTC
-VITE_PAXG_L1_ADDRESS=$PAXG
+# LUSD doubles as the pool reserve / fee token. Derived from tokens.json (ZER-49 §3);
+# this block used to list seven of them by hand and had silently lost PAXS and crvUSD.
+$TOKEN_ENV_LINES
 
 # Chainlink feeds used to price a deposit input that is not a basket member.
 VITE_LUSD_USD_FEED_ADDRESS=$FEED_LUSD_USD
@@ -619,6 +643,27 @@ step "Wiping stale PXE/wallet LMDB state..."
 # pxe_data_*/wallet_data_* — wipe both layouts.
 rm -rf "$SERVER_DIR"/pxe_data_* "$SERVER_DIR"/wallet_data_* "$SERVER_DIR"/aztec-wallet-data \
        "$L2_DIR"/pxe_data_*   "$L2_DIR"/wallet_data_*   "$L2_DIR"/aztec-wallet-data 2>/dev/null || true
+# ASSERT the wipe. `rm -rf ... 2>/dev/null || true` cannot fail, so a store this user
+# does not own survived it in silence while the step reported success. That is not a
+# cosmetic lie: chain-server then dies at startup with
+#
+#     libc++abi: terminating due to uncaught exception of type std::runtime_error:
+#     mdb_env_open: 13 - Permission denied
+#
+# and restart-loops forever. block-producer carries `Requires=chain-server.service`, so
+# systemd stops and restarts IT on every one of those cycles — roughly every 15 seconds,
+# faster than one trigger takes — and the L2 chain stops advancing entirely. The visible
+# symptom is a frozen L2 height, several layers away from a deploy that said it was fine.
+#
+# Deliberately NOT fixed with sudo: this script runs unprivileged by design. A root-owned
+# store means something ran as root that should not have, and the operator needs to know.
+for stale in "$SERVER_DIR"/aztec-wallet-data "$L2_DIR"/aztec-wallet-data; do
+  [ -e "$stale" ] || continue
+  fail "could not remove $stale (owner: $(stat -c '%U:%G' "$stale")). It is owned by another
+       user, so chain-server — which runs as $(id -un) — will crash-loop on
+       'mdb_env_open: 13 - Permission denied' and take block-producer down with it.
+       Remove it with elevated privileges and re-run:  sudo rm -rf $stale"
+done
 ok "Stale PXE state cleared"
 
 # ===========================================================================
@@ -742,16 +787,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
       "timelockDelay": $(jq -r '.timelockDelay' "$L1_GOV"),
       "executionWindow": $(jq -r '.executionWindow' "$L1_GOV")
     },
-    "tokens": {
-      "LUSD": { "address": "$(jq -r '.LUSD' "$L1_TOKENS")", "decimals": 18 },
-      "USDT": { "address": "$(jq -r '.USDT' "$L1_TOKENS")", "decimals": 6 },
-      "USDC": { "address": "$(jq -r '.USDC' "$L1_TOKENS")", "decimals": 6 },
-      "DAI":  { "address": "$(jq -r '.DAI' "$L1_TOKENS")",  "decimals": 18 },
-      "WETH": { "address": "$(jq -r '.WETH' "$L1_TOKENS")", "decimals": 18 },
-      "WBTC": { "address": "$(jq -r '.WBTC' "$L1_TOKENS")", "decimals": 8 },
-      "PAXG": { "address": "$(jq -r '.PAXG' "$L1_TOKENS")", "decimals": 18 },
-      "PAXS": { "address": "$(jq -r '.PAXS' "$L1_TOKENS")", "decimals": 18 }
-    }
+    "tokens": $TOKEN_MANIFEST_BLOCK
   },
   "l2": {
     "pxeUrl": "$(jq -r '.network' "$L2_DEPLOY")",
@@ -791,14 +827,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_FEE_DISTRIBUTION_ADDRESS": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
     "VITE_PAYMENT_ESCROW_ADDRESS": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
     "VITE_SPONSORED_FPC_ADDRESS": "$(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY")",
-    "VITE_LUSD_L1_ADDRESS": "$(jq -r '.LUSD' "$L1_TOKENS")",
-    "VITE_USDT_L1_ADDRESS": "$(jq -r '.USDT' "$L1_TOKENS")",
-    "VITE_USDC_L1_ADDRESS": "$(jq -r '.USDC' "$L1_TOKENS")",
-    "VITE_DAI_L1_ADDRESS": "$(jq -r '.DAI' "$L1_TOKENS")",
-    "VITE_WETH_L1_ADDRESS": "$(jq -r '.WETH' "$L1_TOKENS")",
-    "VITE_WBTC_L1_ADDRESS": "$(jq -r '.WBTC' "$L1_TOKENS")",
-    "VITE_PAXG_L1_ADDRESS": "$(jq -r '.PAXG' "$L1_TOKENS")",
-    "VITE_PAXS_L1_ADDRESS": "$(jq -r '.PAXS' "$L1_TOKENS")",
+$TOKEN_ENV_JSON
     "VITE_LUSD_USD_FEED_ADDRESS": "$FEED_LUSD_USD",
     "VITE_USDT_USD_FEED_ADDRESS": "$FEED_USDT_USD",
     "VITE_USDC_USD_FEED_ADDRESS": "$FEED_USDC_USD",

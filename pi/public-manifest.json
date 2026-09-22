@@ -4,11 +4,11 @@
     "id": "pi",
     "kind": "sandbox",
     "label": "Sandbox (Pi)",
-    "generatedAt": "2026-09-22T03:58:29Z",
+    "generatedAt": "2026-09-22T12:27:17Z",
     "sources": {
-      "v1-l1": "c79c96b",
-      "v1-l2": "1e97aa7",
-      "deployments": "2e10df1"
+      "v1-l1": "0e01f32",
+      "v1-l2": "ad5e346",
+      "deployments": "78a4dec"
     }
   },
   "endpoints": {
@@ -33,8 +33,8 @@
       "collateralReserve": "0xe6b98F104c1BEf218F3893ADab4160Dc73Eb8367",
       "networkFund": "0x5C7c905B505f0Cf40Ab6600d05e677F717916F6B",
       "feeConverter": "0x1e2F4432bFeF9E9Ad39DA6d272F4aFf33629c770",
-      "tokenPortal": "0x1Ef8f58544Ca4d9b1e34E2F9Cd1b37257C618C6D",
-      "basketManager": "0xa8CcbBE18FaaF698E407DEE792370e36B2f505c7",
+      "tokenPortal": "0x1D1aEE6D5dC35F3c15E2D11083D0e59C026b64c4",
+      "basketManager": "0x05275a4799cd1B07D81319390fC62Bc7BDbDf269",
       "chainlinkOracle": "0xbCF26943C0197d2eE0E5D05c716Be60cc2761508",
       "uniswapTwap": "0x59F2f1fCfE2474fD5F0b9BA1E73ca90b143Eb8d0",
       "complianceRegistry": null,
@@ -46,45 +46,49 @@
         "address": "0x1275D096B9DBf2347bD2a131Fb6BDaB0B4882487",
         "decimals": 18
       },
-      "USDT": {
+      "PAXG": {
         "address": "0xC76A71C4492c11bbaDC841342C4Cb470b5d12193",
-        "decimals": 6
-      },
-      "USDC": {
-        "address": "0xF818A7C2AFC45cF4B9DDC48933C9A1edD624e46f",
-        "decimals": 6
+        "decimals": 18
       },
       "DAI": {
-        "address": "0x8613A4029EaA95dA61AE65380aC2e7366451bF2b",
-        "decimals": 18
-      },
-      "WETH": {
-        "address": "0x20Fbd46DeEd5EEDEB6e5c87eeB31924e9CA312ad",
-        "decimals": 18
-      },
-      "WBTC": {
-        "address": "0xe0B39353F69b54e945364ffcdDD7901697Ca0166",
-        "decimals": 8
-      },
-      "PAXG": {
-        "address": "0xE5BD5bDC03371fB239956dbbF40bD185D6c2ea28",
+        "address": "0xF818A7C2AFC45cF4B9DDC48933C9A1edD624e46f",
         "decimals": 18
       },
       "PAXS": {
-        "address": "0xAd5d57aD9bB17d34Debb88566ab2F5dB879Cc46F",
+        "address": "0x8613A4029EaA95dA61AE65380aC2e7366451bF2b",
         "decimals": 18
+      },
+      "WBTC": {
+        "address": "0x20Fbd46DeEd5EEDEB6e5c87eeB31924e9CA312ad",
+        "decimals": 8
+      },
+      "WETH": {
+        "address": "0xe0B39353F69b54e945364ffcdDD7901697Ca0166",
+        "decimals": 18
+      },
+      "crvUSD": {
+        "address": "0xE5BD5bDC03371fB239956dbbF40bD185D6c2ea28",
+        "decimals": 18
+      },
+      "USDC": {
+        "address": "0xAd5d57aD9bB17d34Debb88566ab2F5dB879Cc46F",
+        "decimals": 6
+      },
+      "USDT": {
+        "address": "0x130A46b6E41DB6E1e18fb9c759F223c459190e90",
+        "decimals": 6
       }
     },
     "governance": {
-      "authority": "0x97186594dA62AF0FCdf266E9eAc4736dcA6E6EAE",
-      "timelock": "0x5C15f56Ee55531f011c6025B205c1750EA469f75",
-      "validator": "0xb3e2d928Da7c16d53a8d6DaA14314159fa262754",
+      "authority": "0xC4A743126DCcA4DF85B8f75B6eD113bb69dD65A1",
+      "timelock": "0xB6B18cae509Fcf3542FF6975C2Da06CAAc9773c5",
+      "validator": "0x4060eF0D5a7F0633c5927F7E05041dd7Fcd95f42",
       "admin": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
       "guardian": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
       "proposers": [
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
       ],
-      "transitionAt": 1821585852,
+      "transitionAt": 1821616312,
       "timelockDelay": 3600,
       "executionWindow": 604800
     },
@@ -99,12 +103,12 @@
   },
   "l2": {
     "contracts": {
-      "zeracleToken": "0x155ce4cdfc8eaf3b9e11b8e4f74ae82011bdb51f5dc8d289114233fee179a932",
-      "tokenBridge": "0x103a2816ee85bdd0a4cd8846aba3b6bfc2b5ad8b71fc9570cdb9b7cc2dd6fafb",
-      "feeDistribution": "0x0cd2ff16e5c6bdcd9f9ab14afe3a9288f4153a9916a06453d13608ae4a6d9301",
-      "paymentEscrow": "0x2a47fb3dc8bb9b046371a53f8dc6274d2dcac706a7df35ad4e10ea337a6a2258",
+      "zeracleToken": "0x0a0ed3821a9b1555fe03cfcc31d039a5db985dd4a474fffb1cdd75ab40dc5dc4",
+      "tokenBridge": "0x0ba0fbce3222ff5c7e2ef3c777fd4c671e3474b43d5fcf25c7b5e8618b1573b7",
+      "feeDistribution": "0x1afad497e3f0b582329c980377d1d23c482afc985e2eacd8eab5dfcbad04a6f8",
+      "paymentEscrow": "0x1f0e4ede5aff3158d33cfa779086ceeb7b13efee72c8054b651003346959902e",
       "sponsoredFpc": "0x20e22e53e37cf43003ffb23d117064b0c26c169397a1466f939a93c27a6b05b8",
-      "compliance": "0x2eeeae386b4c081f32fd907a134c7d913fb41fd561d02d6f36b619934c380cf4"
+      "compliance": "0x10f0ad13c4454f35ebbf8fb21313f8c2af50e3f76f6b9ed2d2dd357b21b1c069"
     },
     "complianceEnabled": true,
     "feeDistributionTestHelpers": true,

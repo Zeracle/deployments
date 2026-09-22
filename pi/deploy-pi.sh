@@ -21,8 +21,40 @@ step "JS deps (node_modules excluded from sync)"
 ( cd "$REPO/chain-server" && yarn install --frozen-lockfile ) || fail "chain-server yarn install failed"
 ok "deps installed"
 
+# The embedded wallet's LMDB stores must be owned by the service user. The `pi.conf`
+# drop-ins set `User=admin` precisely so new artefacts land admin-owned, but a store
+# created before those landed — or by anything run under sudo — stays root-owned, and
+# deploy-sandbox.sh runs unprivileged and cannot remove it. chain-server then crash-loops
+# on `mdb_env_open: 13 - Permission denied`, and block-producer's
+# `Requires=chain-server.service` restarts it on every cycle, so the L2 chain stops
+# advancing while every service still reports active.
+#
+# This is the platform layer, and it has sudo, so clear them here before the deploy sees
+# them. deploy-sandbox.sh now also ASSERTS its own wipe, so if one reappears the deploy
+# stops there instead of shipping a chain whose L2 never moves.
+# rpc-proxy carries `Requires=anvil.service`, which propagates a STOP but never a start:
+# stopping anvil (which every redeploy does) takes the proxy down with it, and starting
+# anvil does not bring it back. Nothing else references it, so it stays dead and the
+# public /anvil path answers 502 — the chain is fine, the frontend just cannot reach it.
+# Started explicitly here, in both the first-run and resume branches, so a redeploy always
+# restores public access.
+_start_rpc_proxy() {
+  if systemctl list-unit-files rpc-proxy.service >/dev/null 2>&1; then
+    sudo systemctl start rpc-proxy || echo "  ! rpc-proxy failed to start — the public /anvil path will 502"
+    systemctl is-active --quiet rpc-proxy && ok "rpc-proxy running (public /anvil)"
+  fi
+}
+
+step "Clearing stale embedded-wallet LMDB stores"
+for stale in "$REPO/chain-server/aztec-wallet-data" "$REPO/v1-l2/aztec-wallet-data"; do
+  if [ -e "$stale" ]; then
+    sudo rm -rf "$stale" && echo "  removed $stale"
+  fi
+done
+ok "no stale wallet stores"
+
 step "Bring up chain + deploy (once) or resume"
-sudo systemctl reset-failed anvil aztec-sandbox chain-server block-producer 2>/dev/null || true
+sudo systemctl reset-failed anvil aztec-sandbox chain-server block-producer rpc-proxy 2>/dev/null || true
 if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
   echo "Manifest present: resuming persisted chain (no redeploy)."
   sudo systemctl start anvil || fail "anvil failed (mock-feed install fails the start; see journalctl -u anvil)"
@@ -30,6 +62,7 @@ if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
   # via cloud-init; deploy-pi.sh runs as admin, so it needs sudo here.
   sudo bash "$REPO/ops/gen-chain-server-env.sh" "$DATA_MOUNT/deployment-manifest.json"
   sudo systemctl start aztec-sandbox chain-server block-producer
+  _start_rpc_proxy
 else
   echo "First run: deploying contracts."
   sudo systemctl start anvil
@@ -50,6 +83,7 @@ else
   # via cloud-init; deploy-pi.sh runs as admin, so it needs sudo here.
   sudo bash "$REPO/ops/gen-chain-server-env.sh" "$DATA_MOUNT/deployment-manifest.json"
   sudo systemctl start chain-server block-producer
+  _start_rpc_proxy
   ok "first-run deploy complete; manifest at $DATA_MOUNT"
 fi
 
