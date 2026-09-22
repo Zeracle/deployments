@@ -4,11 +4,11 @@
     "id": "pi",
     "kind": "sandbox",
     "label": "Sandbox (Pi)",
-    "generatedAt": "2026-09-22T10:31:04Z",
+    "generatedAt": "2026-09-22T12:27:17Z",
     "sources": {
-      "v1-l1": "6554a4b",
+      "v1-l1": "0e01f32",
       "v1-l2": "ad5e346",
-      "deployments": "39c9bf4"
+      "deployments": "78a4dec"
     }
   },
   "endpoints": {
@@ -22,89 +22,93 @@
   },
   "l1": {
     "chainId": 31337,
-    "deployBlock": 1126,
+    "deployBlock": 42,
     "contracts": {
-      "liquidityPoolProxy": "0x90A9FD59146EF566331456B93274785d0d094033",
-      "liquidityPoolImpl": "0x9A8C70D2c86FDf30cb00Fa08EA7E6F92FCE035BF",
-      "depositAdapter": "0xA8ead175b9F48bC393f086F4c3041015caCa6682",
-      "withdrawalAdapter": "0xFC6CA20a7ea1D6d0489d289F0D3EfF113f915713",
-      "bridgeGuard": "0xf7A12BC661E1878a414b281f10F0A0118edc25C9",
-      "treasury": "0x2D15b0Edf807eD738BD14C961022294519ADB0B7",
-      "collateralReserve": "0xfb0cf111C2A686160D812CB33b78E778EB8E72D2",
-      "networkFund": "0xf373BB61f1a2eFCE7c02E5Bda136201ecC1Ae36c",
-      "feeConverter": "0x05e6768F79BCd5b08ec4900832f04F006D9Ff31d",
-      "tokenPortal": "0x1eB8650091F81272Dc620d90DdA6904610C018e7",
-      "basketManager": "0xa3C3705c6E15166eba8f508b03C3430CA597605a",
-      "chainlinkOracle": "0x31c28d61eC49B06Cc542F7155e0b19f36A614e49",
-      "uniswapTwap": "0x3EF2ECb80a6a298dc1dAa53cA3C9AB26E99b4c6c",
+      "liquidityPoolProxy": "0x0b48aF34f4c854F5ae1A3D587da471FeA45bAD52",
+      "liquidityPoolImpl": "0x05Aa229Aec102f78CE0E852A812a388F076Aa555",
+      "depositAdapter": "0x0f5D1ef48f12b6f691401bfe88c2037c690a6afe",
+      "withdrawalAdapter": "0x90118d110B07ABB82Ba8980D1c5cC96EeA810d2C",
+      "bridgeGuard": "0x73eccD6288e117cAcA738BDAD4FEC51312166C1A",
+      "treasury": "0x381445710b5e73d34aF196c53A3D5cDa58EDBf7A",
+      "collateralReserve": "0xe6b98F104c1BEf218F3893ADab4160Dc73Eb8367",
+      "networkFund": "0x5C7c905B505f0Cf40Ab6600d05e677F717916F6B",
+      "feeConverter": "0x1e2F4432bFeF9E9Ad39DA6d272F4aFf33629c770",
+      "tokenPortal": "0x1D1aEE6D5dC35F3c15E2D11083D0e59C026b64c4",
+      "basketManager": "0x05275a4799cd1B07D81319390fC62Bc7BDbDf269",
+      "chainlinkOracle": "0xbCF26943C0197d2eE0E5D05c716Be60cc2761508",
+      "uniswapTwap": "0x59F2f1fCfE2474fD5F0b9BA1E73ca90b143Eb8d0",
       "complianceRegistry": null,
-      "mockDexAggregator": "0x432208DF6e2219951D4FcA6716B7b6A8b032f4d2",
-      "feeAssetHandler": "0xf42ec71a4440f5e9871c643696dd6dc9a38911f8"
+      "mockDexAggregator": "0xC6bA8C3233eCF65B761049ef63466945c362EdD2",
+      "feeAssetHandler": "0x0b306bf915c4d645ff596e518faf3f9669b97016"
     },
     "tokens": {
       "LUSD": {
-        "address": "0x8CD085Bbe630Eac7912353aAAb4CEb3d2641c4d4",
+        "address": "0x1275D096B9DBf2347bD2a131Fb6BDaB0B4882487",
         "decimals": 18
-      },
-      "USDT": {
-        "address": "0xc298683C59039Db7B0aCA53E9e352FAE3F134564",
-        "decimals": 6
-      },
-      "USDC": {
-        "address": "0x5ca9457Cb84C53B114821A4ce6DF30b9CD11445e",
-        "decimals": 6
-      },
-      "DAI": {
-        "address": "0x104960C5Ff405BDbF3018347cD2B518741cF33bb",
-        "decimals": 18
-      },
-      "WETH": {
-        "address": "0x1f17bAc58193C492EE36Fc95f5bB976F3FfA596B",
-        "decimals": 18
-      },
-      "WBTC": {
-        "address": "0x72dAc711b2C004ed1376d02D46090BD43eCA29D3",
-        "decimals": 8
       },
       "PAXG": {
-        "address": "0xdD44de04B02F9A0fffb5d1d377342b547C7340c5",
+        "address": "0xC76A71C4492c11bbaDC841342C4Cb470b5d12193",
+        "decimals": 18
+      },
+      "DAI": {
+        "address": "0xF818A7C2AFC45cF4B9DDC48933C9A1edD624e46f",
         "decimals": 18
       },
       "PAXS": {
-        "address": "0x7E6D75B080688Ce19082B5fC0EcbFfBceeEAEa79",
+        "address": "0x8613A4029EaA95dA61AE65380aC2e7366451bF2b",
         "decimals": 18
+      },
+      "WBTC": {
+        "address": "0x20Fbd46DeEd5EEDEB6e5c87eeB31924e9CA312ad",
+        "decimals": 8
+      },
+      "WETH": {
+        "address": "0xe0B39353F69b54e945364ffcdDD7901697Ca0166",
+        "decimals": 18
+      },
+      "crvUSD": {
+        "address": "0xE5BD5bDC03371fB239956dbbF40bD185D6c2ea28",
+        "decimals": 18
+      },
+      "USDC": {
+        "address": "0xAd5d57aD9bB17d34Debb88566ab2F5dB879Cc46F",
+        "decimals": 6
+      },
+      "USDT": {
+        "address": "0x130A46b6E41DB6E1e18fb9c759F223c459190e90",
+        "decimals": 6
       }
     },
     "governance": {
-      "authority": "0x80B9603b34fB8a439cDC4271488849B0eD80F80B",
-      "timelock": "0x4212Ba16FD16286de6096df3248301C19C581390",
-      "validator": "0x071c3a42BB01F65190B19626168C27e6776d71fC",
+      "authority": "0xC4A743126DCcA4DF85B8f75B6eD113bb69dD65A1",
+      "timelock": "0xB6B18cae509Fcf3542FF6975C2Da06CAAc9773c5",
+      "validator": "0x4060eF0D5a7F0633c5927F7E05041dd7Fcd95f42",
       "admin": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
       "guardian": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
       "proposers": [
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
       ],
-      "transitionAt": 1821611928,
+      "transitionAt": 1821616312,
       "timelockDelay": 3600,
       "executionWindow": 604800
     },
     "aztec": {
-      "rollup": "0xf67e26649037695ddfab19f4e22d5c9fd1564592",
-      "inbox": "0xf1d8ac14db1c9c1ef05bdd6d469121cc7a43dc15",
-      "registry": "0x10537d7bd661c9c34f547b38ec662d6fd482ae95",
-      "feeJuicePortal": "0xfbd84aca08d588d1d21ba4f168f0819ee6cdfbd5",
-      "feeJuice": "0x273c507d8e21cde039491b14647fe9278d88e91d",
+      "rollup": "0x4ed7c70f96b99c776995fb64377f0d4ab3b0e1c1",
+      "inbox": "0x0665fbb86a3aceca91df68388ec4bbe11556ddce",
+      "registry": "0x610178da211fef7d417bc0e6fed39f05609ad788",
+      "feeJuicePortal": "0xfd05ee8687d4ca828ba3d26ef04b80dd1348e5bd",
+      "feeJuice": "0x0165878a594ca255338adfa4d48449f69242eb8f",
       "nodeVersion": "5.2.0"
     }
   },
   "l2": {
     "contracts": {
-      "zeracleToken": "0x1683d697cddbc71e0df83074140e04916b4af0eb0e3961dc66b8b06e5f28209c",
-      "tokenBridge": "0x251c664220e04795df26c0f0501b228602e9e24651daae7a5fc043b9ae25a90b",
-      "feeDistribution": "0x076299fd4d942cfb2d5b0a3cb8ee4512f8b7de389dc83104a8aab391de6229c9",
-      "paymentEscrow": "0x2e23f6f002c3362fbdd3c7d8bf10cdcb86546e27ecfd8f18f38a336fb1b3e08a",
+      "zeracleToken": "0x0a0ed3821a9b1555fe03cfcc31d039a5db985dd4a474fffb1cdd75ab40dc5dc4",
+      "tokenBridge": "0x0ba0fbce3222ff5c7e2ef3c777fd4c671e3474b43d5fcf25c7b5e8618b1573b7",
+      "feeDistribution": "0x1afad497e3f0b582329c980377d1d23c482afc985e2eacd8eab5dfcbad04a6f8",
+      "paymentEscrow": "0x1f0e4ede5aff3158d33cfa779086ceeb7b13efee72c8054b651003346959902e",
       "sponsoredFpc": "0x20e22e53e37cf43003ffb23d117064b0c26c169397a1466f939a93c27a6b05b8",
-      "compliance": "0x2e95aaaff6a350ac14f7f7de3bc00fc402fa878ff980c2b73f959f87e54df830"
+      "compliance": "0x10f0ad13c4454f35ebbf8fb21313f8c2af50e3f76f6b9ed2d2dd357b21b1c069"
     },
     "complianceEnabled": true,
     "feeDistributionTestHelpers": true,
