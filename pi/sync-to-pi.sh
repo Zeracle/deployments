@@ -13,6 +13,7 @@ ssh "$PI" "sudo mkdir -p $REMOTE && sudo chown \$(id -u):\$(id -g) $REMOTE"
 rsync -a --delete \
   --exclude '.git' --exclude 'node_modules' --exclude 'artifacts' --exclude 'cache' \
   --exclude 'dist' --exclude 'out' --exclude '**/.env' --exclude '**/.env.local' \
+  --include 'deployments/pi/toolchain/solc-*.sha256' \
   --exclude 'deployments/pi/toolchain/solc-*' \
   "$ROOT/v1-l1" "$ROOT/v1-l2" "$ROOT/chain-server" "$ROOT/deployments" \
   "$ROOT/interfaces" "$PI:$REMOTE/"
