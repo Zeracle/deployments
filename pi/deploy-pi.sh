@@ -26,7 +26,9 @@ sudo systemctl reset-failed anvil aztec-sandbox chain-server block-producer 2>/d
 if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
   echo "Manifest present: resuming persisted chain (no redeploy)."
   sudo systemctl start anvil || fail "anvil failed (mock-feed install fails the start; see journalctl -u anvil)"
-  bash "$REPO/ops/gen-chain-server-env.sh" "$DATA_MOUNT/deployment-manifest.json"
+  # Writes /etc/zeracle/chain-server.env — root-owned path. EC2 runs this as root
+  # via cloud-init; deploy-pi.sh runs as admin, so it needs sudo here.
+  sudo bash "$REPO/ops/gen-chain-server-env.sh" "$DATA_MOUNT/deployment-manifest.json"
   sudo systemctl start aztec-sandbox chain-server block-producer
 else
   echo "First run: deploying contracts."
@@ -44,7 +46,9 @@ else
     fi
   done
   [ "$DEPLOY_STATUS" -eq 0 ] || fail "deploy-sandbox.sh failed (exit $DEPLOY_STATUS); manifest persisted if produced"
-  bash "$REPO/ops/gen-chain-server-env.sh" "$DATA_MOUNT/deployment-manifest.json"
+  # Writes /etc/zeracle/chain-server.env — root-owned path. EC2 runs this as root
+  # via cloud-init; deploy-pi.sh runs as admin, so it needs sudo here.
+  sudo bash "$REPO/ops/gen-chain-server-env.sh" "$DATA_MOUNT/deployment-manifest.json"
   sudo systemctl start chain-server block-producer
   ok "first-run deploy complete; manifest at $DATA_MOUNT"
 fi
