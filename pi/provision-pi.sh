@@ -131,13 +131,21 @@ sudo sed "s|@REPO@|$REPO|g" \
 # Drop-ins (templated ones get the same substitution).
 for u in anvil aztec-sandbox chain-server block-producer; do
   sudo mkdir -p "/etc/systemd/system/$u.service.d"
-  sudo sed "s|@DATA@|$DATA_MOUNT|g; s|@MAINNET@|$FORK_FLAGS|g; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g" \
+  sudo sed "s|@DATA@|$DATA_MOUNT|g; s|@MAINNET@|$FORK_FLAGS|g; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g; s|@BLOCK_INTERVAL@|${BLOCK_PRODUCER_INTERVAL:-10}|g" \
     "$SCRIPT_DIR/systemd/$u.service.d/pi.conf" | sudo tee "/etc/systemd/system/$u.service.d/pi.conf" >/dev/null
 done
 # Pi-only unit with no EC2 equivalent: the public RPC method-allowlist proxy
 # that Tailscale Funnel points at instead of anvil itself.
 sudo sed "s|@REPO@|$REPO|g" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
   | sudo tee /etc/systemd/system/rpc-proxy.service >/dev/null
+# The embedded wallet's LMDB store is created by whichever service touches it
+# first — chain-server runs as root, so the dir lands root-owned and a manual
+# `sandbox-block-producer.sh` run as admin dies with "mdb_env_open: 13". Create
+# it up front owned by the admin user; root can still write to it.
+sudo mkdir -p "$REPO/v1-l2/aztec-wallet-data"
+sudo chown -R "${SUDO_USER:-$USER}":"${SUDO_USER:-$USER}" "$REPO/v1-l2/aztec-wallet-data"
+ok "aztec-wallet-data owned by ${SUDO_USER:-$USER}"
+
 sudo systemctl daemon-reload
 sudo systemctl enable anvil aztec-sandbox chain-server block-producer rpc-proxy
 ok "units installed + enabled (not started)"
