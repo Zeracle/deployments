@@ -25,7 +25,7 @@
 # feed's real `updatedAt` (D-f), every valuation goes stale about an hour
 # after the fork. MockPriceFeed reports a live `block.timestamp` instead, so
 # re-installing on a fork is required, not just harmless. Re-running this
-# script is idempotent and cheap (8 creates plus 8 `anvil_setCode` calls).
+# script is idempotent and cheap (9 creates plus 9 `anvil_setCode` calls).
 #
 # Env:
 #   ETH_RPC_URL             (default http://localhost:8545)
@@ -64,6 +64,15 @@ L1_DIR="${L1_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../v1-l1" && pwd)}"
 # ChainlinkOracleWrapper.getPrice(feed), so without these two rows there is no
 # ETH or USDC price on the sandbox at all and the deposit quote dies.
 #   feed_address : answer(8dp) : label
+# ZER-49/ZER-48: the crvUSD row below uses DeployMocks' CHAINLINK_CRVUSD_USD_PLACEHOLDER,
+# not a real Chainlink proxy — the real crvUSD/USD feed has not been selected
+# (docs/protocol/oracles.md). On anvil the address is just a slot we install mock
+# bytecode at, and DeployMocks refuses the placeholder on any chain but 31337.
+# Without that row the pool cannot price 20% of the basket and every valuation reverts.
+#
+# NOTE: the reader below is `while IFS=: read -r addr answer label` and skips only
+# EMPTY lines — a `#` comment inside this block would be parsed as a feed address.
+# Keep this block pure data.
 FEEDS="
 0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0:100000000:LUSD/USD=\$1
 0x3E7d1eAB13ad0104d2750B8863b489D65364e32D:100000000:USDT/USD=\$1
@@ -73,6 +82,7 @@ FEEDS="
 0x379589227b15F1a12195D3f2d90bBc9F31f95235:2500000000:XAG/USD=\$25
 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c:6000000000000:BTC/USD=\$60000
 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419:300000000000:ETH/USD=\$3000
+0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC:100000000:crvUSD/USD=\$1
 "
 
 echo "install-mock-feeds: chain id 31337 confirmed → installing MockPriceFeed at mainnet feed addresses ($RPC)"
