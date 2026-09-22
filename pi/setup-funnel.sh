@@ -39,17 +39,19 @@ for spec in "8546:rpc-proxy" "8080:aztec" "3001:chain-server"; do
   ok "$name listening on $port"
 done
 
+# --yes is load-bearing: without it `tailscale serve` prompts for confirmation
+# and blocks forever when run over a non-TTY ssh session.
 step "Configuring serve paths on :443"
-sudo tailscale serve --bg --https=443 --set-path=/anvil http://127.0.0.1:8546 \
+sudo tailscale serve --bg --yes --https=443 --set-path=/anvil http://127.0.0.1:8546 \
   || fail "failed to set /anvil — check 'tailscale serve' syntax for $(tailscale version | head -1)"
-sudo tailscale serve --bg --https=443 --set-path=/aztec http://127.0.0.1:8080 \
+sudo tailscale serve --bg --yes --https=443 --set-path=/aztec http://127.0.0.1:8080 \
   || fail "failed to set /aztec"
-sudo tailscale serve --bg --https=443 --set-path=/api http://127.0.0.1:3001 \
+sudo tailscale serve --bg --yes --https=443 --set-path=/api http://127.0.0.1:3001 \
   || fail "failed to set /api"
 ok "serve paths configured"
 
 step "Enabling Funnel on :443 (public)"
-sudo tailscale funnel --bg --https=443 on \
+sudo tailscale funnel --bg --yes --https=443 on \
   || fail "could not enable Funnel — the tailnet may need the 'funnel' node attribute in its ACL policy (tailscale prints an enable URL above)"
 ok "funnel on"
 
