@@ -1,0 +1,20 @@
+[Unit]
+Description=Zeracle public RPC method-allowlist proxy (fronts anvil for Funnel)
+Requires=anvil.service
+After=anvil.service
+
+[Service]
+# Fronts anvil on loopback only. Tailscale Funnel connects to THIS, never to
+# 8545 directly, so public callers cannot reach anvil's admin methods. On-box
+# services (chain-server, block-producer) keep talking to 8545 directly.
+ExecStart=/usr/local/bin/node @REPO@/deployments/pi/rpc-proxy/rpc-allowlist-proxy.mjs
+Environment=LISTEN_HOST=127.0.0.1
+Environment=LISTEN_PORT=8546
+Environment=UPSTREAM_URL=http://127.0.0.1:8545
+Restart=on-failure
+RestartSec=5
+MemoryHigh=192M
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

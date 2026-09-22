@@ -14,11 +14,13 @@
 .DEFAULT_GOAL := help
 
 CHAIN_SERVER_DIR := ../chain-server
+WEB_DIR := ../interfaces/apps/web
 
 .PHONY: help test \
         deploy-sandbox-local deploy-sandbox-local-skip-infra stop-sandbox-local stop-clean \
         deploy deploy-skip-infra stop \
         deploy-sandbox-ec2 deploy-sandbox-ec2-apply \
+        sync-pi provision-pi deploy-pi web-env-pi build-web-pi deploy-web-pi \
         deploy-testnet deploy-mainnet \
         chain-server chain-server-dev \
         fes fes-web fes-docs fes-chain stop-fes stop-fes-web stop-fes-docs stop-fes-chain
@@ -50,6 +52,30 @@ deploy-sandbox-ec2: ## Build the EC2 sandbox release tarball, print next steps
 
 deploy-sandbox-ec2-apply: ## Build the tarball, then `terraform apply` (interactive)
 	./sandbox-ec2/deploy-ec2.sh --apply
+
+## ----- Sandbox: Raspberry Pi chain host (hosted, persistent) -----
+#
+# Replaced the retired EC2 box. Chain services + build host on the Pi; see
+# pi/README.md. sync-pi ships the same release tarball EC2 uses, so the two
+# platform layers cannot drift.
+
+sync-pi: ## Push the zeracle tree to the Pi at /opt/zeracle (release tarball)
+	./pi/sync-to-pi.sh
+
+provision-pi: ## One-time idempotent host setup on the Pi (swap, docker, node, foundry, solc, units)
+	ssh $${PI_HOST:-pi} 'bash /opt/zeracle/deployments/pi/provision-pi.sh'
+
+deploy-pi: ## Deploy (or resume) the chain on the Pi
+	ssh $${PI_HOST:-pi} 'bash /opt/zeracle/deployments/pi/deploy-pi.sh'
+
+web-env-pi: ## Regenerate interfaces/apps/web/.env.pi from the Pi deployment manifest
+	./pi/gen-web-env.sh
+
+build-web-pi: ## Build the web app against the Pi chain host
+	cd $(WEB_DIR) && yarn build:pi
+
+deploy-web-pi: ## Build + publish the web app to S3/CloudFront (needs ZERACLE_WEB_BUCKET, ZERACLE_WEB_DISTRIBUTION_ID)
+	cd $(WEB_DIR) && yarn deploy:pi
 
 ## ----- Testnet (official Aztec testnet — not the sandbox) -----
 
