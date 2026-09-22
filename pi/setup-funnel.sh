@@ -39,33 +39,33 @@ for spec in "8546:rpc-proxy" "8080:aztec" "3001:chain-server"; do
   ok "$name listening on $port"
 done
 
-# --yes is load-bearing: without it `tailscale serve` prompts for confirmation
-# and blocks forever when run over a non-TTY ssh session.
-step "Configuring serve paths on :443"
-sudo tailscale serve --bg --yes --https=443 --set-path=/anvil http://127.0.0.1:8546 \
-  || fail "failed to set /anvil — check 'tailscale serve' syntax for $(tailscale version | head -1)"
-sudo tailscale serve --bg --yes --https=443 --set-path=/aztec http://127.0.0.1:8080 \
-  || fail "failed to set /aztec"
-sudo tailscale serve --bg --yes --https=443 --set-path=/api http://127.0.0.1:3001 \
-  || fail "failed to set /api"
-# `tailscale serve` exits 0 even when it refuses (e.g. "Serve is not enabled on
-# your tailnet" + an enable URL), so the exit codes above prove nothing. Assert
-# the config actually landed — same reason bootstrap.sh asserts a mountpoint
-# rather than trusting `mount -a`.
-SERVE_STATUS="$(sudo tailscale serve status 2>&1 || true)"
-for p in /anvil /aztec /api; do
-  echo "$SERVE_STATUS" | grep -q -- "$p" \
-    || fail "serve path $p is not in 'tailscale serve status' — the tailnet likely needs Serve enabled (an enable URL was printed above)"
-done
-ok "serve paths configured and verified"
+# --yes is load-bearing: without it the CLI prompts for confirmation and blocks
+# forever when run over a non-TTY ssh session.
+#
+# `tailscale funnel` (not `serve`) is what makes a path PUBLIC. There is no
+# separate "funnel on" step in 1.x — `funnel <target>` takes the same flags as
+# `serve` and publishes that path. The older `tailscale funnel 443 on` form
+# parses "on" as a target URL and fails.
+step "Publishing paths on :443 via Funnel (public)"
+sudo tailscale funnel --bg --yes --https=443 --set-path=/anvil http://127.0.0.1:8546 >/dev/null \
+  || fail "failed to publish /anvil"
+sudo tailscale funnel --bg --yes --https=443 --set-path=/aztec http://127.0.0.1:8080 >/dev/null \
+  || fail "failed to publish /aztec"
+sudo tailscale funnel --bg --yes --https=443 --set-path=/api http://127.0.0.1:3001 >/dev/null \
+  || fail "failed to publish /api"
 
-step "Enabling Funnel on :443 (public)"
-sudo tailscale funnel --bg --yes --https=443 on \
-  || fail "could not enable Funnel — the tailnet may need the 'funnel' node attribute in its ACL policy (tailscale prints an enable URL above)"
+# These commands exit 0 even when refused (e.g. "Serve is not enabled on your
+# tailnet" plus an enable URL), so exit codes prove nothing. Assert the config
+# actually landed AND is public — the same reason bootstrap.sh asserts a
+# mountpoint rather than trusting `mount -a`.
 FUNNEL_STATUS="$(sudo tailscale funnel status 2>&1 || true)"
-echo "$FUNNEL_STATUS" | grep -qi "funnel on\|https://" \
-  || fail "Funnel is not actually on — check the enable URL printed above"
-ok "funnel on and verified"
+for pth in /anvil /aztec /api; do
+  echo "$FUNNEL_STATUS" | grep -q -- "$pth" \
+    || fail "$pth is not in 'tailscale funnel status' — the tailnet may need Funnel enabled (an enable URL was printed above)"
+done
+echo "$FUNNEL_STATUS" | grep -qi "tailnet only" \
+  && fail "paths are still tailnet-only — Funnel did not take effect"
+ok "all three paths published publicly"
 
 step "Current config"
 sudo tailscale serve status || true
