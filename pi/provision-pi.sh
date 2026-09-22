@@ -120,23 +120,33 @@ SOLC_VERSION="$SOLC_VERSION" bash "$SCRIPT_DIR/toolchain/install-solc.sh"
 
 step "systemd units + Pi drop-ins"
 FORK_FLAGS="${MAINNET_RPC_URL:+--fork-url $MAINNET_RPC_URL}"   # empty -> unforked
-sudo sed "s|@REPO@|$REPO|g; s|@DATA@|$DATA_MOUNT|g; s|@AZTEC_TAG@|$AZTEC_IMAGE_TAG|g; s|@MAINNET@|$FORK_FLAGS|g" \
+# One substitution set for base units AND drop-ins. Keeping them separate meant
+# a drop-in that used a placeholder the drop-in sed did not know about was
+# installed with the literal @TOKEN@ in it and the unit failed to start — which
+# happened twice (@REPO@, then @AZTEC_TAG@).
+SUBST="s|@REPO@|$REPO|g"
+SUBST="$SUBST; s|@DATA@|$DATA_MOUNT|g"
+SUBST="$SUBST; s|@AZTEC_TAG@|$AZTEC_IMAGE_TAG|g"
+SUBST="$SUBST; s|@MAINNET@|$FORK_FLAGS|g"
+SUBST="$SUBST; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g"
+SUBST="$SUBST; s|@BLOCK_INTERVAL@|${BLOCK_PRODUCER_INTERVAL:-10}|g"
+sudo sed "$SUBST" \
   "$REPO/ops/systemd/anvil.service" | sudo tee /etc/systemd/system/anvil.service >/dev/null
-sudo sed "s|@DATA@|$DATA_MOUNT|g; s|@AZTEC_TAG@|$AZTEC_IMAGE_TAG|g" \
+sudo sed "$SUBST" \
   "$REPO/ops/systemd/aztec-sandbox.service" | sudo tee /etc/systemd/system/aztec-sandbox.service >/dev/null
-sudo sed "s|@REPO@|$REPO|g; s|@DATA@|$DATA_MOUNT|g" \
+sudo sed "$SUBST" \
   "$REPO/ops/systemd/chain-server.service" | sudo tee /etc/systemd/system/chain-server.service >/dev/null
-sudo sed "s|@REPO@|$REPO|g" \
+sudo sed "$SUBST" \
   "$REPO/ops/systemd/block-producer.service" | sudo tee /etc/systemd/system/block-producer.service >/dev/null
 # Drop-ins (templated ones get the same substitution).
 for u in anvil aztec-sandbox chain-server block-producer; do
   sudo mkdir -p "/etc/systemd/system/$u.service.d"
-  sudo sed "s|@REPO@|$REPO|g; s|@DATA@|$DATA_MOUNT|g; s|@MAINNET@|$FORK_FLAGS|g; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g; s|@BLOCK_INTERVAL@|${BLOCK_PRODUCER_INTERVAL:-10}|g" \
+  sudo sed "$SUBST" \
     "$SCRIPT_DIR/systemd/$u.service.d/pi.conf" | sudo tee "/etc/systemd/system/$u.service.d/pi.conf" >/dev/null
 done
 # Pi-only unit with no EC2 equivalent: the public RPC method-allowlist proxy
 # that Tailscale Funnel points at instead of anvil itself.
-sudo sed "s|@REPO@|$REPO|g" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
+sudo sed "$SUBST" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
   | sudo tee /etc/systemd/system/rpc-proxy.service >/dev/null
 # The embedded wallet's LMDB store is created by whichever service touches it
 # first — chain-server runs as root, so the dir lands root-owned and a manual
