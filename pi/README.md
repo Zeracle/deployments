@@ -107,8 +107,10 @@ tracked as a separate ticket, not part of this build.
 
 - Compile with the pinned solc, not any solc `forge` finds on `PATH`:
   `FOUNDRY_SOLC=/opt/zeracle/toolchain/solc-0.8.37`. This must equal
-  `v1-l1/foundry.toml`'s `solc_version` (`0.8.37`); `provision-pi.sh` and
-  `install-solc.sh` both assert this and fail loudly on drift.
+  `v1-l1/foundry.toml`'s `solc_version` (`0.8.37`); `install-solc.sh`
+  asserts this directly and fails loudly on drift. `provision-pi.sh`
+  gets the same protection transitively — it calls `install-solc.sh`
+  as its last installer step.
 - For routine `forge test` runs, use a 200-run optimizer profile — the
   default 10,000-run profile is reserved for size/gas-sensitive checks
   (`FOUNDRY_PROFILE=deploy forge build --sizes`), where the extra

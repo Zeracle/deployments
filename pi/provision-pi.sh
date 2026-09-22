@@ -53,7 +53,7 @@ else
     fallocate -l "${SWAP_GIB}G" "$SWAP_FILE" || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$((SWAP_GIB*1024))
     chmod 600 "$SWAP_FILE"; mkswap "$SWAP_FILE" >/dev/null
   fi
-  swapon "$SWAP_FILE"
+  sudo swapon "$SWAP_FILE"
   ok "swap on ($SWAP_GIB GiB)"
 fi
 # Persist across reboot; nofail so a missing swapfile never blocks boot.
