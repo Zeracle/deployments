@@ -134,6 +134,10 @@ for u in anvil aztec-sandbox chain-server block-producer; do
   sudo sed "s|@DATA@|$DATA_MOUNT|g; s|@MAINNET@|$FORK_FLAGS|g; s|@ANVIL_BIND@|${ANVIL_BIND:-tailscale}|g" \
     "$SCRIPT_DIR/systemd/$u.service.d/pi.conf" | sudo tee "/etc/systemd/system/$u.service.d/pi.conf" >/dev/null
 done
+# Pi-only unit with no EC2 equivalent: the public RPC method-allowlist proxy
+# that Tailscale Funnel points at instead of anvil itself.
+sudo sed "s|@REPO@|$REPO|g" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
+  | sudo tee /etc/systemd/system/rpc-proxy.service >/dev/null
 sudo systemctl daemon-reload
-sudo systemctl enable anvil aztec-sandbox chain-server block-producer
+sudo systemctl enable anvil aztec-sandbox chain-server block-producer rpc-proxy
 ok "units installed + enabled (not started)"
