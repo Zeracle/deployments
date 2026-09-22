@@ -72,10 +72,14 @@ web-env-pi: ## Regenerate interfaces/apps/web/.env.pi from the Pi deployment man
 	./pi/gen-web-env.sh
 
 build-web-pi: ## Build the web app against the Pi chain host
-	cd $(WEB_DIR) && yarn build:pi
+	$(MAKE) -C $(WEB_DIR) build-pi
 
-deploy-web-pi: ## Build + publish the web app to S3/CloudFront (needs ZERACLE_WEB_BUCKET, ZERACLE_WEB_DISTRIBUTION_ID)
-	cd $(WEB_DIR) && yarn deploy:pi
+# Delegates to the web app's own Makefile, which already owns the two-pass S3
+# sync (hashed assets immutable; index.html/sw.js/webmanifest no-cache — the
+# PWA service worker must never be cached immutably) and the CloudFront
+# invalidation, with the bucket and distribution defaulted there.
+deploy-web-pi: ## Build + publish the web app to S3/CloudFront (see interfaces/apps/web/Makefile)
+	$(MAKE) -C $(WEB_DIR) deploy-pi
 
 ## ----- Testnet (official Aztec testnet — not the sandbox) -----
 
