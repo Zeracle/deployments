@@ -11,7 +11,8 @@
 #
 # Stages:
 #   0. Preflight — tools, env, L1 RPC chain id, deployer balance, Aztec node
-#                  reachability + version match. (this file, implemented)
+#                  reachability + version match, deployer L1 fee-asset
+#                  (fee-juice token) balance. (this file, implemented)
 #   1. L1 deploy — Sepolia contracts + mock tokens/feeds + bridge. (stub —
 #                  Tasks 3-4 of the testnet-deploy-pipeline plan fill this in)
 #   2. L2 deploy — Aztec testnet contracts + fee-juice bootstrap. (stub)
@@ -93,10 +94,23 @@ MISSING_VARS=()
 [ -n "${TESTNET_L1_RPC_URL:-}" ] || MISSING_VARS+=("TESTNET_L1_RPC_URL")
 [ -n "${DEPLOYER_PRIVATE_KEY:-}" ] || MISSING_VARS+=("DEPLOYER_PRIVATE_KEY")
 [ -n "${AZTEC_NODE_URL:-}" ] || MISSING_VARS+=("AZTEC_NODE_URL")
+[ -n "${PUBLIC_L1_RPC:-}" ] || MISSING_VARS+=("PUBLIC_L1_RPC")
 if [ ${#MISSING_VARS[@]} -gt 0 ]; then
   fail "Missing required env vars in $SCRIPT_DIR/.env: ${MISSING_VARS[*]}. See $SCRIPT_DIR/.env.example."
 fi
-ok "TESTNET_L1_RPC_URL, DEPLOYER_PRIVATE_KEY, AZTEC_NODE_URL all set"
+ok "TESTNET_L1_RPC_URL, DEPLOYER_PRIVATE_KEY, AZTEC_NODE_URL, PUBLIC_L1_RPC all set"
+
+# I4: both endpoints this run publishes into the public manifest (chain-view)
+# must be checked for embedded credentials before anything is broadcast to
+# Sepolia — not only after, when a refusal would be far more expensive to
+# unwind. Uses the same check public-manifest.sh itself refuses a keyed
+# endpoint with, exposed as a side-effect-free mode.
+step "Preflight: checking PUBLIC_L1_RPC and AZTEC_NODE_URL carry no credentials..."
+bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$PUBLIC_L1_RPC" \
+  || fail "PUBLIC_L1_RPC carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted RPC. See $SCRIPT_DIR/.env.example."
+bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$AZTEC_NODE_URL" \
+  || fail "AZTEC_NODE_URL carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted endpoint. See $SCRIPT_DIR/.env.example."
+ok "PUBLIC_L1_RPC and AZTEC_NODE_URL carry no embedded credentials"
 
 step "Preflight: checking L1 RPC chain id (must be Sepolia 11155111)..."
 if ! L1_CHAIN_ID=$(cast chain-id --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
@@ -273,6 +287,7 @@ try {
     rollupAddress: info.l1ContractAddresses.rollupAddress.toString(),
     registryAddress: info.l1ContractAddresses.registryAddress.toString(),
     feeJuicePortalAddress: info.l1ContractAddresses.feeJuicePortalAddress.toString(),
+    feeJuiceAddress: info.l1ContractAddresses.feeJuiceAddress.toString(),
   }));
 } catch (err) {
   console.error(err && err.message ? err.message : String(err));
@@ -317,6 +332,56 @@ ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
 ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
 ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
 
+# T5-R9: Stage 2 (v1-l2/scripts/deploy.ts) bridges the deployer's OWN L1
+# fee-asset balance non-mint — a real network has no faucet. Stage 2 only runs
+# after every Stage 1 Sepolia tx has spent gas, and the pipeline has no resume
+# flag for Stage 1, so a short balance must be caught HERE, before anything
+# broadcasts. The token is the L1 fee-juice ERC20 the node itself reports (the
+# one L1FeeJuicePortalManager bridges). The signer matches: stage_l2_deploy
+# passes L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY". The amount matches:
+# L1_FEE_ASSET_BRIDGE_AMOUNT is exported from .env (set -a), and empty or unset
+# means 1e18 here exactly as in resolveFeeAssetBridgeMode(). deploy.ts repeats
+# this check right before its bridge as a second guard.
+step "Preflight: checking deployer L1 fee-asset balance (fee-juice token)..."
+L1_FEE_JUICE_ADDRESS=$(echo "$NODE_INFO_JSON" | jq -r '.feeJuiceAddress')
+[[ "$L1_FEE_JUICE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "Aztec node at $AZTEC_NODE_URL did not report a valid L1 fee-juice token address (got '$L1_FEE_JUICE_ADDRESS')."
+# ZER-11: a re-run that reuses an already-bridged fee-juice claim makes no new
+# L1 fee-asset spend, so this gate must not demand the amount a second time.
+# The operator funds the deployer with exactly L1_FEE_ASSET_BRIDGE_AMOUNT (what
+# .env.example tells them to do); the run that crashed already spent it, so the
+# balance is now ~0. Demanding it again would fail here and make the recovery
+# path unreachable in precisely the case it exists for. deploy.ts applies the
+# same rule on its side (resolveDeployerClaimSource, utils/deployer_account.ts).
+# The path mirrors v1-l2's pendingFeeClaimPath(DEPLOYER_ACCOUNT_FILE), and
+# stage_l2_deploy sets DEPLOYER_ACCOUNT_FILE="$SCRIPT_DIR/deployer-account.json".
+PENDING_CLAIM_FILE="$SCRIPT_DIR/deployer-account.json.pending-claim.json"
+if [ -f "$PENDING_CLAIM_FILE" ]; then
+  FEE_ASSET_REQUIRED=0
+  FEE_ASSET_SUMMARY="not checked — Stage 2 reuses a pending claim, so it bridges nothing"
+  ok "Fee-juice token:   $L1_FEE_JUICE_ADDRESS"
+  warn "Pending fee-juice claim found: $PENDING_CLAIM_FILE"
+  warn "Stage 2 will REUSE the claim a previous run already bridged on L1 rather than bridging again,"
+  warn "so the deployer fee-asset balance gate is skipped for this run."
+  warn "That file holds the claim SECRET: keep it private, never commit or ship it. It is cleared"
+  warn "automatically once the claim is spent by the SponsoredFPC deploy."
+else
+  FEE_ASSET_REQUIRED="${L1_FEE_ASSET_BRIDGE_AMOUNT:-1000000000000000000}"
+  [[ "$FEE_ASSET_REQUIRED" =~ ^[0-9]+$ ]] || fail "L1_FEE_ASSET_BRIDGE_AMOUNT ($FEE_ASSET_REQUIRED) must be a base-10 integer (base units of the fee-juice token). See $SCRIPT_DIR/.env.example."
+  if ! FEE_ASSET_BALANCE_OUT=$(cast call "$L1_FEE_JUICE_ADDRESS" 'balanceOf(address)(uint256)' "$DEPLOYER_ADDRESS" --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
+    fail "Could not read the fee-juice token balance (token $L1_FEE_JUICE_ADDRESS, deployer $DEPLOYER_ADDRESS) from $TESTNET_L1_RPC_URL: $FEE_ASSET_BALANCE_OUT"
+  fi
+  # cast prints large uint256 values as "<decimal> [<scientific>]"; keep the decimal.
+  FEE_ASSET_BALANCE="${FEE_ASSET_BALANCE_OUT%% *}"
+  [[ "$FEE_ASSET_BALANCE" =~ ^[0-9]+$ ]] || fail "Unexpected balanceOf output from fee-juice token $L1_FEE_JUICE_ADDRESS: $FEE_ASSET_BALANCE_OUT"
+  # Exact big-integer compare: bash arithmetic overflows past 2^63 and awk rounds.
+  if ! python3 -c 'import sys; sys.exit(0 if int(sys.argv[1]) >= int(sys.argv[2]) else 1)' "$FEE_ASSET_BALANCE" "$FEE_ASSET_REQUIRED"; then
+    fail "Fee-asset shortfall: deployer $DEPLOYER_ADDRESS holds $FEE_ASSET_BALANCE base units of the L1 fee-juice token $L1_FEE_JUICE_ADDRESS, but the L2 deploy bridges $FEE_ASSET_REQUIRED (L1_FEE_ASSET_BRIDGE_AMOUNT, default 1e18). There is no faucet on a real network: fund the deployer with that token and retry. Nothing has been broadcast."
+  fi
+  FEE_ASSET_SUMMARY="$FEE_ASSET_BALANCE base units (L2 deploy bridges $FEE_ASSET_REQUIRED)"
+  ok "Fee-juice token:   $L1_FEE_JUICE_ADDRESS"
+  ok "Fee-asset balance: $FEE_ASSET_BALANCE base units (>= $FEE_ASSET_REQUIRED required)"
+fi
+
 step "Preflight: checking prebuilt L2 artifacts + web env template..."
 # Hoisted from stage_l2_deploy/stage_manifest_sync (same fail messages) so a
 # missing prebuilt artifact or template file is caught here, before the
@@ -356,6 +421,8 @@ cat <<SUMMARY
   L1 Rollup address:            $L1_ROLLUP_ADDRESS
   L1 Registry address:          $L1_REGISTRY_ADDRESS
   L1 FeeJuicePortal address:    $L1_FEE_JUICE_PORTAL_ADDRESS
+  L1 fee-juice token:           $L1_FEE_JUICE_ADDRESS
+  Deployer fee-asset balance:   $FEE_ASSET_SUMMARY
   ETHERSCAN_API_KEY set:        $([ -n "${ETHERSCAN_API_KEY:-}" ] && echo "yes (--verify will run on L1 targets)" || echo "no (contracts deploy unverified)")
 
 SUMMARY
@@ -374,8 +441,9 @@ fi
 # Stage 1: L1 deploy (Sepolia)
 #
 # Reuses v1-l1's env-driven testnet make targets (Task 2 of the
-# testnet-deploy-pipeline plan): deploy-testnet-l1 -> deploy-mocks-testnet ->
-# install-mock-feeds.sh -> deploy-bridge-testnet. Each target writes its own
+# testnet-deploy-pipeline plan): deploy-testnet-l1 -> deploy-mocks-testnet
+# (which now deploys fresh Sepolia-native price feeds itself — T2 — with no
+# separate anvil-only feed-install step) -> deploy-bridge-testnet. Each target writes its own
 # `*-testnet.json` output (never clobbering the sandbox's local.json/
 # tokens.json/bridge.json); every write is asserted with jq before we trust
 # it and move on.
@@ -416,54 +484,37 @@ stage_l1_deploy() {
   ok "PAXG:  $(jq -r '.PAXG' deployments/tokens-testnet.json)"
   ok "PAXS:  $(jq -r '.PAXS' deployments/tokens-testnet.json)"
 
-  step "L1: installing mock Chainlink price feeds..."
-  # Mock Chainlink feeds. install-mock-feeds.sh now decides by probing the chain for
-  # code at the LUSD/USD feed address (G17); it installs via anvil_setCode, which a
-  # real Sepolia RPC does not expose — this stage is a known live-run blocker until a
-  # Sepolia-native feed strategy exists (see README).
-  ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-    L1_DIR="$L1_DIR" \
-    bash "$ROOT_DIR/deployments/sandbox-local/install-mock-feeds.sh"
-  ok "Mock price feeds installed"
+  ok "Mock price feeds: deployed fresh by DeployMocks (T2 — this chain id is not 31337)"
 
-  # Entry-asset (USDC/WETH) input pricing.
-  #
-  # These two are accepted as deposit INPUTS but are not basket legs, so the pool
-  # refuses to value them; DepositAdapter prices them through `inputPriceFeeds`,
-  # which `deploy-mocks-testnet` above wired to the CANONICAL MAINNET feed addresses
-  # (the only ones the repo has — they are what the web config and
-  # install-mock-feeds.sh use, so sandbox stays consistent).
-  #
-  # KNOWN TESTNET GAP: there are no Sepolia feed addresses for the entry tokens in
-  # this repo, and mainnet feed addresses have no code on Sepolia. The wiring is
-  # therefore correct-but-inert on a live Sepolia run: every USDC or WETH deposit
-  # will revert inside the adapter's slippage check. Basket legs (LUSD/USDT/WBTC/
-  # DAI/PAXG/PAXS) are unaffected — they are priced by the pool.
-  #
-  # Closing it means supplying real Sepolia aggregator addresses and calling
-  # DepositAdapter.setInputPriceFeed(token, feed) for each, AND setting the matching
-  # VITE_{USDC,ETH}_USD_FEED_ADDRESS in the web env so the off-chain quote and the
-  # on-chain check agree. Addresses are deliberately NOT invented here.
-  step "L1: verifying entry-asset (USDC/WETH) input price feeds..."
-  entry_gap=0
-  for entry in "USDC:0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6" "WETH:0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"; do
-    sym="${entry%%:*}"; want="${entry##*:}"
+  # Feed-code preflight (T2): DeployMocks (T2, run above via 'make deploy-mocks-testnet')
+  # always deploys a fresh MockPriceFeed per basket/entry leg on a non-31337 chain and
+  # publishes all 8 addresses under tokens-testnet.json .feeds.*. There is no more
+  # "known gap" — a missing or codeless feed here means DeployMocks' Sepolia branch
+  # did not run, so this is a hard failure, not a warning.
+  step "L1: verifying all 8 feed addresses have code (T2 feed-code preflight)..."
+  for sym in LUSD PAXG DAI PAXS WBTC WETH USDC USDT; do
+    feed=$(jq -r --arg s "$sym" '.feeds[$s]' deployments/tokens-testnet.json)
+    [ -n "$feed" ] && [ "$feed" != "null" ] || fail "$sym missing from deployments/tokens-testnet.json .feeds — 'make deploy-mocks-testnet' did not deploy it (see T2)."
+    code=$(cast code "$feed" --rpc-url "$TESTNET_L1_RPC_URL")
+    [ -n "$code" ] && [ "$code" != "0x" ] || fail "$sym feed $feed has NO CODE on $TESTNET_L1_RPC_URL — DeployMocks' fresh-feed deploy (T2) did not run or the RPC points at the wrong chain."
+    ok "  $sym feed -> $feed (code present)"
+  done
+
+  # Entry-asset (USDC/USDT) input pricing. These two are accepted as deposit INPUTS
+  # but are not basket legs (WETH IS a basket leg and has no input feed, so it is
+  # deliberately not checked here); DepositAdapter prices them through
+  # `inputPriceFeeds`, which DeployMocks step 3b wires to the fresh Sepolia feeds
+  # above (.feeds.USDC / .feeds.USDT).
+  step "L1: verifying entry-asset (USDC/USDT) input price feeds..."
+  for sym in USDC USDT; do
     tok=$(jq -r --arg s "$sym" '.[$s]' deployments/tokens-testnet.json)
     [ -n "$tok" ] && [ "$tok" != "null" ] || fail "$sym missing from deployments/tokens-testnet.json — 'make deploy-mocks-testnet' did not deploy it."
+    want=$(jq -r --arg s "$sym" '.feeds[$s]' deployments/tokens-testnet.json)
     got=$(cast call "$DEPOSIT_ADAPTER" "inputPriceFeeds(address)(address)" "$tok" --rpc-url "$TESTNET_L1_RPC_URL")
     [ "$(echo "$got" | tr '[:upper:]' '[:lower:]')" = "$(echo "$want" | tr '[:upper:]' '[:lower:]')" ] \
       || fail "DepositAdapter.inputPriceFeeds($sym $tok) is $got, expected $want — 'make deploy-mocks-testnet' did not run DeployMocks step 3b."
-    feed_code=$(cast code "$want" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
-    if [ -z "$feed_code" ] || [ "$feed_code" = "0x" ]; then
-      warn "$sym feed $want has NO CODE on this chain — $sym deposits WILL REVERT. This is the known Sepolia entry-token feed gap (see the comment above)."
-      entry_gap=1
-    else
-      ok "  $sym -> $want (live)"
-    fi
+    ok "  $sym -> $want (live)"
   done
-  if [ "$entry_gap" = 1 ]; then
-    warn "Entry tokens USDC and WETH are NOT usable on this chain. LUSD / USDT / WBTC deposits are unaffected."
-  fi
 
   step "L1: deploying TokenPortal bridge (Sepolia)..."
   INBOX_ADDRESS="$L1_INBOX_ADDRESS" ROLLUP_ADDRESS="$L1_ROLLUP_ADDRESS" \
@@ -471,6 +522,12 @@ stage_l1_deploy() {
     make deploy-bridge-testnet
   [ -f deployments/bridge-testnet.json ] || fail "v1-l1/deployments/bridge-testnet.json was not created by 'make deploy-bridge-testnet'. Check the forge output above for the actual failure."
   TOKEN_PORTAL=$(jq -r '.tokenPortal' deployments/bridge-testnet.json)
+  # Checked here, not just where it is consumed: Stage 2 passes this straight into
+  # `yarn deploy:clean` as L1_TOKEN_PORTAL, and a literal "null" would deploy an
+  # unusable bridge after spending L2 gas. v1-l1/Makefile guards it the same way.
+  { [ -n "$TOKEN_PORTAL" ] && [ "$TOKEN_PORTAL" != "null" ]; } \
+    || fail "deployments/bridge-testnet.json has no .tokenPortal — 'make deploy-bridge-testnet' did not record the TokenPortal address. Nothing downstream can be wired without it."
+
   ok "TokenPortal: $TOKEN_PORTAL"
   # Not wired to an L2 TokenBridge yet — the L2 TokenBridge doesn't exist
   # until stage_l2_deploy runs. Wiring happens there (see wire-bridge-testnet
@@ -494,12 +551,72 @@ stage_l1_deploy() {
 # (Task 4) tells deploy.ts's isTestnetL1Mode() branch where to persist/reload
 # the real testnet deployer keypair (sandbox has no such file — it uses the
 # canonical pre-deployed test account instead, unaffected by this var).
+# FEE_CUSTODIAN_ACCOUNT_FILE (D-b/Db-4) is the same idea for the fee
+# custodian: deploy.ts now REQUIRES it in testnet mode (a separate key file
+# from DEPLOYER_ACCOUNT_FILE, so a keeper that sweeps as the custodian never
+# needs the deployer's L2 secret) and refuses to run without it — set the
+# same way, right below, so this stage doesn't regress the moment deploy.ts
+# starts requiring it.
 #
 # After the L2 contracts land, wires the freshly deployed L2 TokenBridge into
 # the Stage 1 L1 TokenPortal via `make wire-bridge-testnet` (v1-l1/Makefile,
 # Task 4) — the same script the sandbox uses (scripts/wire-bridge.sh),
 # pointed at deployments/bridge-testnet.json.
 # ===========================================================================
+
+# ---------------------------------------------------------------------------
+# ZER-27 (T6): prove the L2 bridge is paired to Stage 1's L1 TokenPortal.
+#
+# ZeracleBridge's `portal` is a PublicImmutable its constructor writes once
+# (v1-l2/contracts/zeracle-bridge/src/zeracle_bridge.nr). Deposits consume L1
+# messages from it and exits message it, so a bridge holding the wrong -- or a
+# zero -- portal is dead in both directions, and off-sandbox nothing can repair
+# it: redeploy-bridge.ts is only ever called by deploy-sandbox.sh.
+#
+# The post-wire asserts below check the L1 side only (TokenPortal.l2Bridge()),
+# which a zero-portal bridge passes happily. This runs first, and reads the
+# portal the bridge was actually CONSTRUCTED with, as recorded in
+# deployment.json's `bridge.l1Portal` by scripts/deploy.ts -- the same block
+# redeploy-bridge.ts rewrites, so the two writers cannot drift apart.
+#
+# Reads deployment.json from the current directory (stage_l2_deploy has already
+# cd'd to $L2_DIR). $1 is Stage 1's TokenPortal address.
+# ---------------------------------------------------------------------------
+assert_bridge_portal_matches() {
+  local expected="$1"
+  local recorded
+
+  # Stage 1's side first. TOKEN_PORTAL is read straight out of bridge-testnet.json
+  # with no validation, so an empty or null value here means Stage 1 never produced
+  # a portal -- and reporting that as an L2 mismatch would send the operator hunting
+  # a stale rerun when the fault is upstream.
+  if [ -z "$expected" ] || [ "$expected" = "null" ]; then
+    fail "Stage 1 produced no TokenPortal address (v1-l1/deployments/bridge-testnet.json .tokenPortal is empty or null), so the L2 bridge's pairing cannot be checked. This is a STAGE 1 failure, not an L2 one -- re-read the 'make deploy-bridge-testnet' output above."
+  fi
+
+  jq -e . deployment.json >/dev/null 2>&1 \
+    || fail "v1-l2/deployment.json is not valid JSON. 'yarn deploy:clean' reported success but left a file that cannot be read, so nothing downstream can be trusted."
+
+  recorded=$(jq -r '.bridge.l1Portal // ""' deployment.json)
+
+  if [ -z "$recorded" ] || [ "$recorded" = "null" ]; then
+    fail "v1-l2/deployment.json has no .bridge.l1Portal. The L2 bridge deploy did not record the L1 portal it was constructed with, so there is no way to tell whether it is paired to $expected or to nothing at all. This field is written by v1-l2/scripts/deploy.ts (ZER-27 T6) -- deploying from a v1-l2 that predates it is not supported on a live network."
+  fi
+
+  local recorded_lc expected_lc
+  recorded_lc=$(echo "$recorded" | tr '[:upper:]' '[:lower:]')
+  expected_lc=$(echo "$expected" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$recorded_lc" = "0x0000000000000000000000000000000000000000" ]; then
+    fail "The L2 bridge was deployed with a ZERO L1 portal. Its portal is a write-once PublicImmutable and there is no off-sandbox re-pairing path, so this bridge can never carry a deposit or an exit. Check that L1_TOKEN_PORTAL reached 'yarn deploy:clean' in Stage 2 above. Refusing to spend the one-shot wire-bridge-testnet call on it."
+  fi
+
+  if [ "$recorded_lc" != "$expected_lc" ]; then
+    fail "The L2 bridge was deployed against L1 portal $recorded, but Stage 1 deployed TokenPortal at $expected. The bridge's portal is immutable, so wiring this pair would produce a permanently one-sided bridge. Refusing to spend the one-shot wire-bridge-testnet call on it."
+  fi
+
+  ok "L2 bridge portal matches Stage 1 TokenPortal ($expected)"
+}
 
 stage_l2_deploy() {
   cd "$L2_DIR"
@@ -512,6 +629,17 @@ stage_l2_deploy() {
   step "L2: deploying Aztec testnet contracts + fee-juice bootstrap..."
   DEPLOYER_ACCOUNT_FILE="$SCRIPT_DIR/deployer-account.json"
   export DEPLOYER_ACCOUNT_FILE
+  # D-b/Db-4: same treatment as DEPLOYER_ACCOUNT_FILE above — set + exported
+  # (not passed inline to yarn deploy:clean, mirroring exactly how
+  # DEPLOYER_ACCOUNT_FILE itself reaches deploy.ts) rather than read from
+  # .env, since it names a path this script computes, not a value the
+  # operator supplies.
+  FEE_CUSTODIAN_ACCOUNT_FILE="$SCRIPT_DIR/fee-custodian-account.json"
+  export FEE_CUSTODIAN_ACCOUNT_FILE
+  # Compliance (attestor + zkPassport + bridge exit enforcement) is not part of
+  # the testnet release (owner decision 2026-09-13). ZERACLE_COMPLIANCE=off
+  # deploys no Compliance contract and gives the bridge AztecAddress.ZERO (exit
+  # enforcement disabled); deploy.ts refuses a live-network deploy without it.
   AZTEC_RPC_HOST="$AZTEC_NODE_URL" \
     L1_RPC_URL="$TESTNET_L1_RPC_URL" \
     L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
@@ -522,8 +650,12 @@ stage_l2_deploy() {
     L1_NETWORK_FUND="$NETWORK_FUND" \
     DEPLOY_TX_TIMEOUT_SECS=600 \
     ETH_CHAIN_ID=11155111 \
+    ZERACLE_COMPLIANCE=off \
     yarn deploy:clean
   [ -f deployment.json ] || fail "v1-l2/deployment.json was not created by 'yarn deploy:clean'. Check the deploy output above for the actual failure."
+  [ "$(jq -r '.complianceEnabled' deployment.json)" = "false" ] || fail "v1-l2/deployment.json reports complianceEnabled=$(jq -r '.complianceEnabled' deployment.json) — the testnet release must deploy with ZERACLE_COMPLIANCE=off (no attestor/zkPassport on testnet)."
+  [ "$(jq -r '.contracts.compliance' deployment.json)" = "null" ] || fail "v1-l2/deployment.json lists a Compliance contract ($(jq -r '.contracts.compliance' deployment.json)) — expected none with ZERACLE_COMPLIANCE=off."
+  ok "Compliance OFF: no Compliance contract deployed; bridge exit enforcement disabled"
 
   ok "ZeracleToken:    $(jq -r '.contracts.zeracleToken' deployment.json)"
   ok "TokenBridge:     $(jq -r '.contracts.tokenBridge' deployment.json)"
@@ -532,6 +664,9 @@ stage_l2_deploy() {
   ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (deployed but UNFUNDED — top up via the chain-view admin panel before any sponsored tx will go through)"
   ok "Deployer:        $(jq -r '.deployer' deployment.json)"
   ok "Deployer keys:   $DEPLOYER_ACCOUNT_FILE (BACK THIS UP — never commit/ship it)"
+  ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; no on-chain deployment needed: initializerless, sweep pays via the sponsored FPC)"
+
+  assert_bridge_portal_matches "$TOKEN_PORTAL"
 
   step "L2: wiring L1 TokenPortal to the freshly deployed L2 TokenBridge..."
   L2_BRIDGE_ADDRESS=$(jq -r '.contracts.tokenBridge' deployment.json)
@@ -588,7 +723,7 @@ stage_governance_handover() {
     AUTH=$(jq -r '.authority // ""' deployments/governance-testnet.json 2>/dev/null || true)
     CODE=$(cast code "$AUTH" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
     if [ -n "$AUTH" ] && [ "$CODE" != "0x" ]; then
-      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployGovernance.s.sol:DeployGovernance --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployGovernance.s.sol:DeployGovernance --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
     else
       fail "make deploy-governance-testnet failed before the broadcast landed (no code at the authority address). Check the forge output above; to resume a partial handover set GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR."
     fi
@@ -653,7 +788,7 @@ stage_basket_manager() {
     BM=$(jq -r '.basketManager // ""' deployments/basket-testnet.json 2>/dev/null || true)
     BM_CODE=$(cast code "$BM" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
     if [ -n "$BM" ] && [ "$BM_CODE" != "0x" ]; then
-      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
       warn "NOTE on --libraries: BasketManager needs NONE (it only reads compile-time constants from BasketCompositionLib), so a library flag will not fix a failure here. The LiquidityPool IMPLEMENTATION is the contract that does need --libraries, and the usual cause of ITS verification failing is a STALE basketCompositionLib: the link is per-implementation, so a UUPS upgrade redeploys the implementation and may relink it against a newly deployed library, leaving the recorded value describing a library the live pool no longer uses. Nothing asserts that value is current — re-read the link target Upgrade.s.sol logs after every upgrade and refresh local-testnet.json + the manifest before verifying."
     else
       fail "make deploy-basket-manager-testnet failed before the broadcast landed (no code at the manager address). Check the forge output above; to resume a partial wiring set BASKET_MANAGER to the manager this run deployed."
@@ -839,11 +974,24 @@ stage_manifest_sync() {
     "VITE_WETH_L1_ADDRESS": "$(jq -r '.WETH' "$L1_TOKENS")",
     "VITE_WBTC_L1_ADDRESS": "$(jq -r '.WBTC' "$L1_TOKENS")",
     "VITE_PAXG_L1_ADDRESS": "$(jq -r '.PAXG' "$L1_TOKENS")",
-    "VITE_PAXS_L1_ADDRESS": "$(jq -r '.PAXS' "$L1_TOKENS")"
+    "VITE_PAXS_L1_ADDRESS": "$(jq -r '.PAXS' "$L1_TOKENS")",
+    "VITE_LUSD_USD_FEED_ADDRESS": "$(jq -r '.feeds.LUSD' "$L1_TOKENS")",
+    "VITE_USDT_USD_FEED_ADDRESS": "$(jq -r '.feeds.USDT' "$L1_TOKENS")",
+    "VITE_USDC_USD_FEED_ADDRESS": "$(jq -r '.feeds.USDC' "$L1_TOKENS")",
+    "VITE_ETH_USD_FEED_ADDRESS": "$(jq -r '.feeds.WETH' "$L1_TOKENS")",
+    "VITE_BTC_USD_FEED_ADDRESS": "$(jq -r '.feeds.WBTC' "$L1_TOKENS")"
   }
 }
 MANIFEST
   ok "Written $MANIFEST_PATH"
+
+  step "Manifest: writing the public manifest for chain-view..."
+  PM_ENV_ID=testnet PM_KIND=live PM_LABEL="Aztec testnet + Sepolia" PM_CHAIN_ID=11155111 \
+    PM_L1_DIR="$L1_DIR" PM_L2_DIR="$L2_DIR" PM_SUFFIX=-testnet PM_OUT="$SCRIPT_DIR/public-manifest.json" \
+    PM_PUBLIC_L1_RPC="$PUBLIC_L1_RPC" PM_PUBLIC_AZTEC_NODE="$AZTEC_NODE_URL" PM_PUBLIC_CHAIN_SERVER= \
+    PM_EXPLORER_L1=https://sepolia.etherscan.io PM_EXPLORER_L2= \
+    PM_READ_L1_RPC="$TESTNET_L1_RPC_URL" PM_READ_AZTEC_NODE="$AZTEC_NODE_URL" \
+    bash "$ROOT_DIR/deployments/lib/public-manifest.sh"
 
   step "Syncing addresses into interfaces/apps/web/.env.testnet..."
   WEB_ENV="$WEB_DIR/.env.testnet"
@@ -856,7 +1004,11 @@ MANIFEST
   sed -i "s|^VITE_AZTEC_NODE_URL=.*|VITE_AZTEC_NODE_URL=$AZTEC_NODE_URL|" "$WEB_ENV"
   sed -i "s|^VITE_ETH_RPC_URL=.*|VITE_ETH_RPC_URL=$TESTNET_L1_RPC_URL|" "$WEB_ENV"
   sed -i "s|^VITE_ETH_CHAIN_ID=.*|VITE_ETH_CHAIN_ID=11155111|" "$WEB_ENV"
-  ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_RPC_URL, VITE_ETH_CHAIN_ID filled"
+  # Must match the L2 deploy above (ZERACLE_COMPLIANCE=off): the bridge enforces
+  # nothing, so the web app must not ask anyone to verify.
+  grep -q '^VITE_COMPLIANCE_ENABLED=' "$WEB_ENV" || fail "$WEB_ENV has no VITE_COMPLIANCE_ENABLED line — src/config/env.ts refuses to boot without it."
+  sed -i "s|^VITE_COMPLIANCE_ENABLED=.*|VITE_COMPLIANCE_ENABLED=false|" "$WEB_ENV"
+  ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_RPC_URL, VITE_ETH_CHAIN_ID filled; VITE_COMPLIANCE_ENABLED=false"
 
   step "Testnet deploy summary"
   cat <<SUMMARY

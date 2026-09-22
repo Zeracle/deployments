@@ -72,8 +72,9 @@ This re-runs preflight, prints a summary, and then asks for an interactive
 safety net before real funds move). After confirmation it runs, in order:
 
 1. **L1 (Sepolia):** core contracts (`make deploy-testnet-l1`) → mock
-   tokens (`make deploy-mocks-testnet`) → mock Chainlink price feeds
-   (`install-mock-feeds.sh`, RPC-parameterized) → the TokenPortal bridge
+   tokens (`make deploy-mocks-testnet`, which also deploys fresh
+   MockPriceFeeds on Sepolia — T2; `install-mock-feeds.sh` is 31337-only
+   and does not run here) → the TokenPortal bridge
    (`make deploy-bridge-testnet`, using the Inbox/Rollup addresses the
    preflight already fetched from the testnet node). Outputs land in
    `v1-l1/deployments/{local,tokens,bridge}-testnet.json` — the sandbox's
@@ -81,7 +82,11 @@ safety net before real funds move). After confirmation it runs, in order:
 2. **L2 (Aztec testnet):** `yarn deploy:clean` from `v1-l2`, using the
    prebuilt artifacts and the L1 endpoint/key/portal address from step 1.
    Deploys ZeracleToken, TokenBridge, FeeDistribution, PaymentEscrow, and an
-   (unfunded) SponsoredFPC. Output: `v1-l2/deployment.json`. The deployer
+   (unfunded) SponsoredFPC. It runs with `ZERACLE_COMPLIANCE=off`: compliance
+   verification (attestor + zkPassport + the bridge's exit enforcement) is not
+   part of the testnet release, so no Compliance contract is deployed and the
+   bridge's exit check is disabled — the stage asserts `complianceEnabled:
+   false` in `deployment.json`. Output: `v1-l2/deployment.json`. The deployer
    account itself comes from `deployments/testnet/deployer-account.json`
    (see "Deployer account" below) rather than the sandbox's canonical test
    account. Once the L2 contracts are up, this stage also wires the L1
@@ -135,7 +140,8 @@ safety net before real funds move). After confirmation it runs, in order:
    `devops/production/ec2/scripts/sync-env-addresses.py`, then fills in the
    endpoint vars that script deliberately leaves alone
    (`VITE_AZTEC_PXE_URL`, `VITE_AZTEC_NODE_URL`, `VITE_ETH_RPC_URL`,
-   `VITE_ETH_CHAIN_ID`).
+   `VITE_ETH_CHAIN_ID`), and pins `VITE_COMPLIANCE_ENABLED=false` to match the
+   L2 deploy.
 
 ## Deployer account
 
@@ -179,7 +185,7 @@ underlying problem:
 - If **Stage 2** fails, `v1-l1`'s outputs from Stage 1 are untouched;
   re-running the full script re-does Stage 1 too (see above) unless you
   invoke `stage_l2_deploy`'s underlying command directly:
-  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... DEPLOY_TX_TIMEOUT_SECS=600 yarn deploy:clean`
+  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... DEPLOY_TX_TIMEOUT_SECS=600 ZERACLE_COMPLIANCE=off yarn deploy:clean`
   (see "Deployer account" above — reusing the same `DEPLOYER_ACCOUNT_FILE`
   is what makes this safe to repeat). If deploy succeeds but the bridge
   wiring assertion fails afterward, retry just that step with

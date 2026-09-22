@@ -14,29 +14,46 @@
 # bytecode: we deploy one throwaway instance per price to the running anvil,
 # read its code, then `anvil_setCode` that code at the real feed address.
 #
-# Decides by PROBING THE CHAIN (G17): if the LUSD/USD feed address already has
-# code — a forked anvil — nothing is installed. The old MAINNET_RPC_URL check
-# trusted an env var that could disagree with the running anvil.
+# Chain-id gated (T2): this script installs via `anvil_setCode`, an anvil-only
+# debug RPC method a real chain (e.g. Sepolia) does not expose, so it refuses
+# to run against anything but local anvil (chain id 31337).
+#
+# It ALWAYS installs on 31337, including a forked anvil where the LUSD/USD
+# address already has real mainnet code — it used to skip in that case (G17),
+# but a forked anvil's real Chainlink aggregators report a frozen `updatedAt`
+# (fixed at the fork block), and once ChainlinkPriceSource forwards each
+# feed's real `updatedAt` (D-f), every valuation goes stale about an hour
+# after the fork. MockPriceFeed reports a live `block.timestamp` instead, so
+# re-installing on a fork is required, not just harmless. Re-running this
+# script is idempotent and cheap (8 creates plus 8 `anvil_setCode` calls).
 #
 # Env:
 #   ETH_RPC_URL             (default http://localhost:8545)
-#   DEPLOYER_PRIVATE_KEY    (default anvil account 0)
-#   FORCE_MOCK_FEEDS=1      install even if the feed address has code
+#   DEPLOYER_PRIVATE_KEY    (default anvil account 1 — NOT account 0, which is
+#                            the Aztec sequencer's key on the sandbox)
+#   FORCE_MOCK_FEEDS=1      accepted for back-compat; redundant now that this
+#                            script always installs on 31337 (see above) —
+#                            it no longer gates anything.
 set -euo pipefail
 
 RPC="${ETH_RPC_URL:-http://localhost:8545}"
-KEY="${DEPLOYER_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
-L1_DIR="${L1_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../v1-l1" && pwd)}"
+KEY="${DEPLOYER_PRIVATE_KEY:-0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d}"
 
 command -v cast >/dev/null 2>&1 || { echo "install-mock-feeds: cast not found on PATH" >&2; exit 1; }
 command -v forge >/dev/null 2>&1 || { echo "install-mock-feeds: forge not found on PATH" >&2; exit 1; }
 
-PROBE_FEED=0x3D7aE7E594f2f2091Ad8798313450130d0Aba3a0 # LUSD/USD — first row of FEEDS below
-existing=$(cast code --rpc-url "$RPC" "$PROBE_FEED")
-if [ "${FORCE_MOCK_FEEDS:-0}" != 1 ] && [ -n "$existing" ] && [ "$existing" != "0x" ]; then
-  echo "install-mock-feeds: $PROBE_FEED already has code (forked anvil or feeds installed) — skipping."
-  exit 0
+CHAIN_ID=$(cast chain-id --rpc-url "$RPC")
+if [ "$CHAIN_ID" != "31337" ]; then
+  echo "install-mock-feeds: refusing — connected chain id is $CHAIN_ID, not 31337 (local anvil). This script installs bytecode via anvil_setCode, an anvil-only debug RPC method a real chain (e.g. Sepolia, 11155111) does not expose. Start anvil with \`--chain-id 31337\` (a hand-started \`anvil --fork-url ...\` without it reports chain id 1). See T2 (deployments/../temp/versions/260913/testnet-readiness-review.md) for the Sepolia-native feed strategy." >&2
+  exit 1
 fi
+
+# Resolved only after the chain-id guard above: the sibling-repo layout this
+# default assumes doesn't hold in every checkout (e.g. a deployments-only
+# worktree), and callers that only need the guard to run — such as the guard
+# test — must never fail before the guard has a chance to refuse. Set L1_DIR
+# to override.
+L1_DIR="${L1_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../v1-l1" && pwd)}"
 
 # Chainlink USD feeds are all 8-decimal. Prices chosen to match the frontend's
 # sandbox fallback table (interfaces/apps/web/src/services/oracle/priceOracle.ts)
@@ -58,7 +75,7 @@ FEEDS="
 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419:300000000000:ETH/USD=\$3000
 "
 
-echo "install-mock-feeds: unforked anvil → installing MockPriceFeed at mainnet feed addresses ($RPC)"
+echo "install-mock-feeds: chain id 31337 confirmed → installing MockPriceFeed at mainnet feed addresses ($RPC)"
 CREATION=$(cd "$L1_DIR" && forge inspect contracts/mocks/MockPriceFeed.sol:MockPriceFeed bytecode)
 
 # Here-string (not a pipe) keeps the loop in the main shell so `exit 1` on a

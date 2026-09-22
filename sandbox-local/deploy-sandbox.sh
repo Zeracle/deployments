@@ -49,6 +49,22 @@ SERVER_DIR="$ROOT_DIR/chain-server"
 load_env_defaults "$SCRIPT_DIR/.env"
 load_env_defaults "$L1_DIR/.env.local"
 
+# ZER-50: ANVIL_ACCOUNT_COUNT + anvil_accounts_json live here so the --accounts
+# flag below and the manifest's "accounts" array cannot disagree again. Sourced
+# AFTER load_env_defaults: the helper's `:=` default would otherwise win over an
+# ANVIL_ACCOUNT_COUNT set in .env, which takes a file value only when the key is
+# still unset — so the documented knob would be silently ignored there.
+# shellcheck source=../lib/anvil-accounts.sh
+. "$SCRIPT_DIR/../lib/anvil-accounts.sh"
+
+# Validate the count NOW, before anvil starts and before any contract is
+# deployed. `set -e` cannot see a command-substitution failure inside the
+# manifest heredoc far below, so without this an unpublishable count writes
+# `"accounts": ,` — an unparseable manifest, produced after a full deploy, with
+# the script still exiting 0.
+anvil_accounts_json "$ANVIL_ACCOUNT_COUNT" >/dev/null \
+  || fail "ANVIL_ACCOUNT_COUNT=$ANVIL_ACCOUNT_COUNT is not a publishable account count"
+
 # Anvil default — used as a fallback so a fresh checkout works without any
 # manual env setup. Override via .env or v1-l1/.env.local for production.
 : "${DEPLOYER_PRIVATE_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
@@ -155,19 +171,24 @@ wait_for_port() {
 if [ "$SKIP_INFRA" = false ]; then
   # Stop any existing instances
   step "Stopping existing services..."
-  pkill -f "anvil" 2>/dev/null || true
+  # ZER-15: `-x` (exact process name), not `-f` (full cmdline substring) — the
+  # latter also matched the invoking shell when its own cmdline mentioned "anvil".
+  # Same fix as stop-sandbox.sh, which carries the full reasoning.
+  pkill -x anvil 2>/dev/null || true
   (cd "$L2_DIR" && docker-compose -f docker-compose.local.yml down -v 2>/dev/null) || true
   sleep 2
 
   # Start Anvil
   step "Starting Anvil (L1)..."
   cd "$L1_DIR"
-  # 5 dev accounts is plenty (deployer + test users); fewer genesis RPC calls
-  # means public mainnet RPCs are less likely to 429 while forking.
+  # ANVIL_ACCOUNT_COUNT (lib/anvil-accounts.sh) is the ONE place this count
+  # lives: it drives this flag AND the manifest's accounts array. Five is plenty
+  # (deployer + test users) and fewer genesis RPC calls means public mainnet RPCs
+  # are less likely to 429 while forking.
   # --chain-id 31337 keeps the local chain ID stable regardless of fork origin
   # (forking mainnet otherwise inherits chainId=1, which the Aztec sandbox
   # rejects because it expects 31337).
-  ANVIL_FORK_ARGS="--accounts 5 --chain-id 31337"
+  ANVIL_FORK_ARGS="--accounts $ANVIL_ACCOUNT_COUNT --chain-id 31337"
   if [ -n "$MAINNET_RPC_URL" ]; then
     # Pre-flight the RPC so we fail fast on a dead endpoint rather than burning
     # the full anvil startup window.
@@ -253,11 +274,14 @@ NETWORK_FUND=$(jq -r '.networkFund' deployments/local.json)
 ok "LiquidityPool: $POOL"
 ok "DepositAdapter: $ADAPTER"
 
-# Install mock Chainlink feeds when the chain has none. install-mock-feeds.sh
-# probes the LUSD/USD feed address for code (a forked anvil has the real feed;
-# an unforked one has nothing and every deposit would revert on the price
-# read), so this is correct whether anvil was started here or by hand.
-step "Checking Chainlink price feeds (installs mocks on an unforked anvil)..."
+# Install mock Chainlink feeds. install-mock-feeds.sh always installs on
+# chain id 31337, forked or not (T2/B-2): a forked anvil's real Chainlink
+# aggregators report a frozen `updatedAt` (fixed at the fork block), which
+# would go stale about an hour after the fork once ChainlinkPriceSource
+# forwards each feed's real `updatedAt`. MockPriceFeed reports a live
+# `block.timestamp` instead, so re-installing on a fork is required, not
+# just harmless — and cheap, since it's idempotent either way.
+step "Installing mock Chainlink price feeds on 31337..."
 L1_DIR="$L1_DIR" ETH_RPC_URL="$ETH_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
   bash "$SCRIPT_DIR/install-mock-feeds.sh"
 ok "Price feeds verified"
@@ -494,7 +518,10 @@ ZRCL=$(jq -r '.contracts.zeracleToken' "$L2_DIR/deployment.json")
 BRIDGE_L2=$(jq -r '.contracts.tokenBridge' "$L2_DIR/deployment.json")
 FEE_DIST=$(jq -r '.contracts.feeDistribution' "$L2_DIR/deployment.json")
 PAYMENT_ESCROW=$(jq -r '.contracts.paymentEscrow' "$L2_DIR/deployment.json")
-COMPLIANCE=$(jq -r '.contracts.compliance' "$L2_DIR/deployment.json")
+COMPLIANCE=$(jq -r '.contracts.compliance // ""' "$L2_DIR/deployment.json")
+# ZERACLE_COMPLIANCE (v1-l2 deploy.ts). Older deployment.json files predate the
+# flag and always carried a Compliance contract, so an absent key means on.
+COMPLIANCE_ENABLED=$(jq -r 'if .complianceEnabled == false then "false" else "true" end' "$L2_DIR/deployment.json")
 TOKEN_PORTAL=$(jq -r '.tokenPortal' "$L1_DIR/deployments/bridge.json")
 
 # L1 FeeJuicePortal + fee asset — needed by the chain-view admin panel to
@@ -552,6 +579,8 @@ VITE_FEE_DISTRIBUTION_ADDRESS=$FEE_DIST
 VITE_PAYMENT_ESCROW_ADDRESS=$PAYMENT_ESCROW
 VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
 VITE_COMPLIANCE_CONTRACT_ADDRESS=$COMPLIANCE
+# Must match the L2 deploy (v1-l2 ZERACLE_COMPLIANCE) — src/config/env.ts.
+VITE_COMPLIANCE_ENABLED=$COMPLIANCE_ENABLED
 
 # L1 Mock Tokens — the deposit (entry) list plus the withdrawal outputs.
 # LUSD doubles as the pool reserve / fee token.
@@ -572,66 +601,6 @@ VITE_BTC_USD_FEED_ADDRESS=$FEED_BTC_USD
 EOF
 
 ok "Written $ENV_FILE"
-fi
-
-# ===========================================================================
-# 7b. Update chain-view environment
-# ===========================================================================
-
-step "Updating chain-view environment..."
-CHAIN_VIEW_ENV="$ROOT_DIR/chain-view/.env.local"
-
-# Additional L1 addresses chain-view needs
-WITHDRAWAL_ADAPTER=$(jq -r '.withdrawalAdapter'  "$L1_DIR/deployments/local.json")
-BRIDGE_GUARD=$(jq       -r '.bridgeGuard'        "$L1_DIR/deployments/local.json")
-# TREASURY/COLLATERAL_RESERVE/NETWORK_FUND are read earlier (stage 2, right after LUSD) so they're
-# available for the L2 deploy's L1_TREASURY/L1_COLLATERAL_RESERVE/L1_NETWORK_FUND env vars.
-
-# Token addresses (USDT/USDC/DAI/WETH/WBTC/PAXG/PAXS) were read in stage 7a.
-
-# L2 deployer
-L2_DEPLOYER=$(jq -r '.deployer' "$L2_DIR/deployment.json")
-
-if [ "$CHAIN_HOST_HEADLESS" = 0 ]; then
-cat > "$CHAIN_VIEW_ENV" << EOF
-# Auto-generated by deploy-sandbox.sh — do not edit by hand
-VITE_ETH_RPC_URL=http://localhost:8545
-VITE_ETH_CHAIN_ID=31337
-VITE_AZTEC_PXE_URL=http://localhost:8080
-
-# L1 contracts
-VITE_LIQUIDITY_POOL_ADDRESS=$POOL
-VITE_DEPOSIT_ADAPTER_ADDRESS=$ADAPTER
-VITE_WITHDRAWAL_ADAPTER_ADDRESS=$WITHDRAWAL_ADAPTER
-VITE_BRIDGE_GUARD_ADDRESS=$BRIDGE_GUARD
-VITE_TREASURY_ADDRESS=$TREASURY
-VITE_COLLATERAL_RESERVE_ADDRESS=$COLLATERAL_RESERVE
-VITE_BASKET_MANAGER_ADDRESS=$BASKET_MANAGER
-VITE_TOKEN_PORTAL_ADDRESS=$TOKEN_PORTAL
-VITE_FEE_JUICE_PORTAL_ADDRESS=$FEE_JUICE_PORTAL
-VITE_FEE_JUICE_L1_ADDRESS=$FEE_JUICE_ASSET
-VITE_FEE_ASSET_HANDLER_ADDRESS=$FEE_ASSET_HANDLER
-VITE_SPONSORED_FPC_ADDRESS=$SPONSORED_FPC
-
-# L1 tokens
-VITE_LUSD_L1_ADDRESS=$LUSD
-VITE_USDT_L1_ADDRESS=$USDT
-VITE_USDC_L1_ADDRESS=$USDC
-VITE_DAI_L1_ADDRESS=$DAI
-VITE_WETH_L1_ADDRESS=$WETH
-VITE_WBTC_L1_ADDRESS=$WBTC
-VITE_PAXG_L1_ADDRESS=$PAXG
-VITE_PAXS_L1_ADDRESS=$PAXS
-
-# L2 contracts
-VITE_ZRCL_CONTRACT_ADDRESS=$ZRCL
-VITE_BRIDGE_CONTRACT_ADDRESS=$BRIDGE_L2
-VITE_FEE_DISTRIBUTION_ADDRESS=$FEE_DIST
-VITE_PAYMENT_ESCROW_ADDRESS=$PAYMENT_ESCROW
-VITE_L2_DEPLOYER_ADDRESS=$L2_DEPLOYER
-EOF
-
-ok "Written $CHAIN_VIEW_ENV"
 fi
 
 # ===========================================================================
@@ -688,6 +657,28 @@ fi
 
 step "Generating deployment manifest..."
 
+# Built here rather than inside the heredoc: a command substitution that fails
+# during heredoc expansion does not stop the script, so the assignment has to
+# happen where `set -e` can act on it. Piping would mask the status too (the
+# pipeline would report the last command's), hence jq's own indenting.
+# NO PIPE on this line: a pipeline reports the LAST command's status, so
+# `… | sed` would hide a failing anvil_accounts_json from `set -e` just as the
+# heredoc did. Capture first, indent second.
+ACCOUNTS_JSON=$(anvil_accounts_json "$ANVIL_ACCOUNT_COUNT")
+ACCOUNTS_JSON=$(printf '%s\n' "$ACCOUNTS_JSON" | sed '1!s/^/  /')
+
+# ZER-50: refuse to publish accounts the node will not sign for. Run
+# UNCONDITIONALLY — the earlier version gated this on `SKIP_INFRA = false`, i.e.
+# only when this script had just started anvil itself and the answer was nearly
+# tautological. The paths that need it are the opposite ones: `--skip-infra`, and
+# CHAIN_HOST_HEADLESS=1 (the EC2 box), where anvil was started by systemd. That
+# unit hardcodes its own `--accounts 5`
+# (devops/production/ec2/files/ops/systemd/anvil.service), a third copy of this
+# number that ANVIL_ACCOUNT_COUNT does not reach — so asking the node is the only
+# thing that catches a drift between them.
+anvil_assert_unlocked_matches "$ETH_RPC_URL" "$ANVIL_ACCOUNT_COUNT" \
+  || fail "anvil's unlocked account count does not match ANVIL_ACCOUNT_COUNT ($ANVIL_ACCOUNT_COUNT)"
+
 # Read all addresses
 L1_LOCAL="$L1_DIR/deployments/local.json"
 L1_BRIDGE="$L1_DIR/deployments/bridge.json"
@@ -705,68 +696,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "l2Pxe": "http://localhost:8080",
     "accountServer": "http://localhost:3001"
   },
-  "accounts": [
-    {
-      "index": 0,
-      "address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-      "privateKey": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-      "role": "deployer"
-    },
-    {
-      "index": 1,
-      "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-      "privateKey": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-      "role": "user"
-    },
-    {
-      "index": 2,
-      "address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-      "privateKey": "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
-      "role": "user"
-    },
-    {
-      "index": 3,
-      "address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
-      "privateKey": "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
-      "role": "user"
-    },
-    {
-      "index": 4,
-      "address": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
-      "privateKey": "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
-      "role": "user"
-    },
-    {
-      "index": 5,
-      "address": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
-      "privateKey": "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba",
-      "role": "user"
-    },
-    {
-      "index": 6,
-      "address": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
-      "privateKey": "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
-      "role": "user"
-    },
-    {
-      "index": 7,
-      "address": "0x14dC79964da2C08dA15Fd353d30d9CBd31045D41",
-      "privateKey": "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356",
-      "role": "user"
-    },
-    {
-      "index": 8,
-      "address": "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f",
-      "privateKey": "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97",
-      "role": "user"
-    },
-    {
-      "index": 9,
-      "address": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720",
-      "privateKey": "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
-      "role": "user"
-    }
-  ],
+  "accounts": $ACCOUNTS_JSON,
   "l1": {
     "chainId": 31337,
     "contracts": {
@@ -827,7 +757,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "pxeUrl": "$(jq -r '.network' "$L2_DEPLOY")",
     "contracts": {
       "zeracleToken": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
-      "compliance": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
+      "compliance": "$(jq -r '.contracts.compliance // ""' "$L2_DEPLOY")",
       "tokenBridge": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
       "feeDistribution": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
       "paymentEscrow": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
@@ -856,7 +786,7 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
     "VITE_FEE_JUICE_L1_ADDRESS": "$(jq -r '.l1ContractAddresses.feeJuice' "$L2_DEPLOY")",
     "VITE_FEE_ASSET_HANDLER_ADDRESS": "$(jq -r '.l1ContractAddresses.feeAssetHandler // ""' "$L2_DEPLOY")",
     "VITE_ZRCL_CONTRACT_ADDRESS": "$(jq -r '.contracts.zeracleToken' "$L2_DEPLOY")",
-    "VITE_COMPLIANCE_CONTRACT_ADDRESS": "$(jq -r '.contracts.compliance' "$L2_DEPLOY")",
+    "VITE_COMPLIANCE_CONTRACT_ADDRESS": "$(jq -r '.contracts.compliance // ""' "$L2_DEPLOY")",
     "VITE_BRIDGE_CONTRACT_ADDRESS": "$(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")",
     "VITE_FEE_DISTRIBUTION_ADDRESS": "$(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")",
     "VITE_PAYMENT_ESCROW_ADDRESS": "$(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")",
@@ -879,6 +809,32 @@ cat > "$SCRIPT_DIR/deployment-manifest.json" << MANIFEST
 MANIFEST
 
 ok "Written $SCRIPT_DIR/deployment-manifest.json"
+
+step "Writing the public manifest (chain-view)..."
+if [ "$CHAIN_HOST_HEADLESS" = 1 ]; then
+  : "${DOMAIN:?DOMAIN must be set on the EC2 box (bootstrap passes it from ec2.env) to name the public endpoints}"
+  PM_ENV_ID=sandbox-ec2; PM_LABEL="Sandbox (EC2)"
+  PM_PUBLIC_L1_RPC="https://anvil.$DOMAIN"; PM_PUBLIC_AZTEC_NODE="https://aztec.$DOMAIN"; PM_PUBLIC_CHAIN_SERVER="https://api.$DOMAIN"
+else
+  PM_ENV_ID=sandbox-local; PM_LABEL="Sandbox (local)"
+  PM_PUBLIC_L1_RPC=http://localhost:8545; PM_PUBLIC_AZTEC_NODE=http://localhost:8080; PM_PUBLIC_CHAIN_SERVER=http://localhost:3001
+fi
+# C1: the EC2 release tarball excludes .git from every repo, so the
+# generator's own default (git -C ... rev-parse, used when PM_SOURCES_JSON is
+# unset) always fails there. make-release-tarball.sh writes release-sources.json
+# (the shas of the checkouts it packed) at the tarball root instead; pick it up
+# here so the EC2 box's manifest still gets real sources. An already-exported
+# PM_SOURCES_JSON always wins — never overwritten by the file.
+if [ -z "${PM_SOURCES_JSON:-}" ] && [ -f "$ROOT_DIR/release-sources.json" ]; then
+  PM_SOURCES_JSON=$(cat "$ROOT_DIR/release-sources.json")
+fi
+[ -n "${PM_SOURCES_JSON:-}" ] && export PM_SOURCES_JSON
+
+PM_ENV_ID="$PM_ENV_ID" PM_KIND=sandbox PM_LABEL="$PM_LABEL" PM_CHAIN_ID=31337 \
+  PM_L1_DIR="$L1_DIR" PM_L2_DIR="$L2_DIR" PM_SUFFIX= PM_OUT="$SCRIPT_DIR/public-manifest.json" \
+  PM_PUBLIC_L1_RPC="$PM_PUBLIC_L1_RPC" PM_PUBLIC_AZTEC_NODE="$PM_PUBLIC_AZTEC_NODE" PM_PUBLIC_CHAIN_SERVER="$PM_PUBLIC_CHAIN_SERVER" \
+  PM_READ_L1_RPC=http://localhost:8545 PM_READ_AZTEC_NODE=http://localhost:8080 \
+  bash "$SCRIPT_DIR/../lib/public-manifest.sh"
 
 # ===========================================================================
 # Summary

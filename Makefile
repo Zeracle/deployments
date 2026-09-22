@@ -15,7 +15,7 @@
 
 CHAIN_SERVER_DIR := ../chain-server
 
-.PHONY: help \
+.PHONY: help test \
         deploy-sandbox-local deploy-sandbox-local-skip-infra stop-sandbox-local stop-clean \
         deploy deploy-skip-infra stop \
         deploy-sandbox-ec2 deploy-sandbox-ec2-apply \
@@ -94,6 +94,23 @@ stop-fes-docs: ## Stop only the docs app
 
 stop-fes-chain: ## Stop only the chain view
 	./sandbox-local/stop-fes.sh chain
+
+## ----- Tests -----
+
+# ZER-11: these shell tests existed with nothing to run them, so a regression
+# guard only spoke up if someone happened to invoke it by hand — which is not
+# the moment a guard is for. They are all offline: they read and parse scripts
+# rather than executing them, and never touch Sepolia, the Aztec testnet or the
+# EC2 sandbox. One exception worth knowing: install-mock-feeds-chain-guard
+# binds local port 8597 for a stub RPC (still no outside network).
+test: ## Run the offline shell tests (lib/test + sandbox-local/test)
+	@fail=0; \
+	for t in lib/test/*.test.sh sandbox-local/test/*.test.sh; do \
+	  [ -f "$$t" ] || continue; \
+	  echo "== $$t"; \
+	  bash "$$t" || fail=1; \
+	done; \
+	exit $$fail
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
