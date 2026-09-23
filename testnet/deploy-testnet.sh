@@ -372,6 +372,29 @@ else
   ok "Canonical SponsoredFPC: $CANONICAL_FPC_ADDRESS (fee-juice balance $(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
 fi
 
+# ZER-29 (T11): cross-account private note discovery needs the standard
+# HandshakeRegistry published at the canonical address baked into the circuits.
+# Its absence is SILENT — transfers land and the recipient simply never sees
+# them — so it is checked rather than assumed. Whether Aztec's testnet has it
+# at genesis is unverified, which is exactly why this runs here, before any
+# Sepolia broadcast, rather than being discovered after the L1 suite is paid
+# for. Delegates to v1-l2 so the canonical address has one definition, shared
+# with scripts/deploy-handshake-registry.ts.
+#
+# Fails loud rather than auto-deploying: publishing the registry is a real
+# universal deploy, and slipping an unplanned one into an already-long
+# pipeline run is a bigger blast radius than stopping and pointing at the
+# existing idempotent script.
+step "Preflight: standard HandshakeRegistry published on the Aztec node..."
+if ! HANDSHAKE_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx --yes tsx scripts/check-handshake-registry.ts 2>/dev/null); then
+  # Same empty-input trap as the FPC preflight above: `.message // "fallback"`
+  # would yield a blank error when the script never ran at all.
+  HANDSHAKE_MSG=$(printf '%s' "$HANDSHAKE_JSON" | jq -r '.message // empty' 2>/dev/null || true)
+  [ -n "$HANDSHAKE_MSG" ] || HANDSHAKE_MSG="Could not run the HandshakeRegistry preflight (cd $L2_DIR && npx --yes tsx scripts/check-handshake-registry.ts) — it produced no output. Check that v1-l2's dependencies are installed and that AZTEC_NODE_URL ($AZTEC_NODE_URL) is reachable."
+  fail "$HANDSHAKE_MSG"
+fi
+ok "HandshakeRegistry published at $(printf '%s' "$HANDSHAKE_JSON" | jq -r '.address')"
+
 # T5-R9: Stage 2 (v1-l2/scripts/deploy.ts) bridges the deployer's OWN L1
 # fee-asset balance non-mint — a real network has no faucet. Stage 2 only runs
 # after every Stage 1 Sepolia tx has spent gas, and the pipeline has no resume
@@ -494,8 +517,24 @@ stage_l1_deploy() {
   cd "$L1_DIR"
 
   step "L1: deploying core contracts (Sepolia)..."
-  ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-    make deploy-testnet-l1
+  # ZER-29: tolerate a --verify-only failure, mirroring Stage 2b/2c. Removing
+  # the output file FIRST matters: forge writes it at simulation time, so a
+  # stale file from a previous run would leave an address whose code is
+  # already on-chain and produce a false "the broadcast landed" warning.
+  rm -f deployments/local-testnet.json
+  if ! ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+    make deploy-testnet-l1; then
+    # The file existing is NOT proof the broadcast landed. Check on-chain code
+    # at the recorded pool proxy: a non-zero forge exit after a successful
+    # broadcast is most likely Etherscan verification failing.
+    POOL_PROXY_CHECK=$(jq -r '.liquidityPoolProxy // ""' deployments/local-testnet.json 2>/dev/null || true)
+    POOL_PROXY_CODE=$(cast code "$POOL_PROXY_CHECK" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -n "$POOL_PROXY_CHECK" ] && [ "$POOL_PROXY_CODE" != "0x" ]; then
+      warn "forge exited non-zero but the LiquidityPool proxy at $POOL_PROXY_CHECK has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployLocal.s.sol:DeployLocal --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    else
+      fail "make deploy-testnet-l1 failed before the broadcast landed (no code at the LiquidityPool proxy address). Check the forge output above."
+    fi
+  fi
   [ -f deployments/local-testnet.json ] || fail "v1-l1/deployments/local-testnet.json was not created by 'make deploy-testnet-l1'. Check the forge output above for the actual failure."
   LIQUIDITY_POOL_PROXY=$(jq -r '.liquidityPoolProxy' deployments/local-testnet.json)
   DEPOSIT_ADAPTER=$(jq -r '.depositAdapter' deployments/local-testnet.json)
@@ -513,8 +552,22 @@ stage_l1_deploy() {
   ok "NetworkFund:       $NETWORK_FUND"
 
   step "L1: deploying mock tokens (Sepolia)..."
-  ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-    make deploy-mocks-testnet
+  # ZER-29: same tolerance. LUSD is only a PROXY for "did this land" — this
+  # target deploys 8 tokens, 8 feeds and the input-feed wiring, so one address
+  # having code does not prove every leg succeeded. That is fine here: the
+  # feed-code and input-price-feed loops below remain the authoritative
+  # postcondition checks, and they run whether or not this tolerated the exit.
+  rm -f deployments/tokens-testnet.json
+  if ! ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+    make deploy-mocks-testnet; then
+    LUSD_CHECK=$(jq -r '.LUSD // ""' deployments/tokens-testnet.json 2>/dev/null || true)
+    LUSD_CODE=$(cast code "$LUSD_CHECK" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -n "$LUSD_CHECK" ] && [ "$LUSD_CODE" != "0x" ]; then
+      warn "forge exited non-zero but the mock LUSD at $LUSD_CHECK has code — the broadcast landed; most likely Etherscan verification failed. The feed-code checks below will still catch a genuinely partial deploy. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployMocks.s.sol:DeployMocks --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    else
+      fail "make deploy-mocks-testnet failed before the broadcast landed (no code at the mock LUSD address). Check the forge output above."
+    fi
+  fi
   [ -f deployments/tokens-testnet.json ] || fail "v1-l1/deployments/tokens-testnet.json was not created by 'make deploy-mocks-testnet'. Check the forge output above for the actual failure."
   ok "LUSD:  $(jq -r '.LUSD' deployments/tokens-testnet.json)"
   ok "USDT:  $(jq -r '.USDT' deployments/tokens-testnet.json)"
@@ -558,9 +611,19 @@ stage_l1_deploy() {
   done
 
   step "L1: deploying TokenPortal bridge (Sepolia)..."
-  INBOX_ADDRESS="$L1_INBOX_ADDRESS" ROLLUP_ADDRESS="$L1_ROLLUP_ADDRESS" \
+  # ZER-29: same tolerance as the two targets above and Stage 2b/2c.
+  rm -f deployments/bridge-testnet.json
+  if ! INBOX_ADDRESS="$L1_INBOX_ADDRESS" ROLLUP_ADDRESS="$L1_ROLLUP_ADDRESS" \
     ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
-    make deploy-bridge-testnet
+    make deploy-bridge-testnet; then
+    PORTAL_CHECK=$(jq -r '.tokenPortal // ""' deployments/bridge-testnet.json 2>/dev/null || true)
+    PORTAL_CODE=$(cast code "$PORTAL_CHECK" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+    if [ -n "$PORTAL_CHECK" ] && [ "$PORTAL_CODE" != "0x" ]; then
+      warn "forge exited non-zero but the TokenPortal at $PORTAL_CHECK has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployBridge.s.sol:DeployBridge --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    else
+      fail "make deploy-bridge-testnet failed before the broadcast landed (no code at the TokenPortal address). Check the forge output above."
+    fi
+  fi
   [ -f deployments/bridge-testnet.json ] || fail "v1-l1/deployments/bridge-testnet.json was not created by 'make deploy-bridge-testnet'. Check the forge output above for the actual failure."
   TOKEN_PORTAL=$(jq -r '.tokenPortal' deployments/bridge-testnet.json)
   # Checked here, not just where it is consumed: Stage 2 passes this straight into
@@ -1043,13 +1106,38 @@ MANIFEST
   step "Filling endpoint vars in .env.testnet (sync-env-addresses.py deliberately leaves these alone)..."
   sed -i "s|^VITE_AZTEC_PXE_URL=.*|VITE_AZTEC_PXE_URL=$AZTEC_NODE_URL|" "$WEB_ENV"
   sed -i "s|^VITE_AZTEC_NODE_URL=.*|VITE_AZTEC_NODE_URL=$AZTEC_NODE_URL|" "$WEB_ENV"
-  sed -i "s|^VITE_ETH_RPC_URL=.*|VITE_ETH_RPC_URL=$TESTNET_L1_RPC_URL|" "$WEB_ENV"
+  # R18: the PUBLIC (keyless) RPC, never TESTNET_L1_RPC_URL. Vite inlines every
+  # VITE_* var into the client bundle at build time, so the keyed broadcasting
+  # URL written here would be readable by every browser that loads the testnet
+  # web app. TESTNET_L1_RPC_URL needs its key precisely because it broadcasts;
+  # PUBLIC_L1_RPC is the one already vetted for publication (see the Stage 0
+  # credential preflight) and already used for the public manifest.
+  grep -q '^VITE_ETH_RPC_URL=' "$WEB_ENV" || fail "$WEB_ENV has no VITE_ETH_RPC_URL line to fill — the sed below would silently do nothing and ship an app with no L1 RPC."
+  sed -i "s|^VITE_ETH_RPC_URL=.*|VITE_ETH_RPC_URL=$PUBLIC_L1_RPC|" "$WEB_ENV"
   sed -i "s|^VITE_ETH_CHAIN_ID=.*|VITE_ETH_CHAIN_ID=11155111|" "$WEB_ENV"
   # Must match the L2 deploy above (ZERACLE_COMPLIANCE=off): the bridge enforces
   # nothing, so the web app must not ask anyone to verify.
   grep -q '^VITE_COMPLIANCE_ENABLED=' "$WEB_ENV" || fail "$WEB_ENV has no VITE_COMPLIANCE_ENABLED line — src/config/env.ts refuses to boot without it."
   sed -i "s|^VITE_COMPLIANCE_ENABLED=.*|VITE_COMPLIANCE_ENABLED=false|" "$WEB_ENV"
-  ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_RPC_URL, VITE_ETH_CHAIN_ID filled; VITE_COMPLIANCE_ENABLED=false"
+  # R18 regression guard, checked against what actually landed in the file
+  # rather than against what we meant to write. Two assertions, because they
+  # catch different mistakes:
+  #
+  #   1. Exact equality with PUBLIC_L1_RPC. This is the strong one. It fails
+  #      the moment anyone reintroduces a different variable here, whatever
+  #      that variable happens to look like.
+  #   2. The credential check. Weaker on its own -- it is a heuristic
+  #      (userinfo, a >=20-char path segment, a key-ish query param name), so a
+  #      keyed URL shaped differently could pass it -- but it is what catches
+  #      PUBLIC_L1_RPC itself being wrong, independently of Stage 0.
+  #
+  # Neither prints the value: a failure here is about a credential.
+  WEB_RPC_VALUE=$(grep '^VITE_ETH_RPC_URL=' "$WEB_ENV" | head -1 | cut -d= -f2-)
+  [ -n "$WEB_RPC_VALUE" ] || fail "$WEB_ENV's VITE_ETH_RPC_URL is empty after sync — the web app cannot reach L1. Check the sed above."
+  [ "$WEB_RPC_VALUE" = "$PUBLIC_L1_RPC" ] || fail "$WEB_ENV's VITE_ETH_RPC_URL does not match PUBLIC_L1_RPC after sync. Vite inlines VITE_* into the client bundle, so this must be the keyless public RPC and nothing else. Check the sed above."
+  bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$WEB_RPC_VALUE" >/dev/null \
+    || fail "$WEB_ENV's VITE_ETH_RPC_URL carries credentials after sync — it would ship in the web bundle. This must never happen; check the sed above and PUBLIC_L1_RPC."
+  ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_CHAIN_ID filled; VITE_ETH_RPC_URL set to the keyless PUBLIC_L1_RPC and asserted credential-free; VITE_COMPLIANCE_ENABLED=false"
 
   step "Testnet deploy summary"
   cat <<SUMMARY
