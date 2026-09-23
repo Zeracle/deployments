@@ -81,8 +81,10 @@ safety net before real funds move). After confirmation it runs, in order:
    `local.json`/`tokens.json`/`bridge.json` are never touched.
 2. **L2 (Aztec testnet):** `yarn deploy:clean` from `v1-l2`, using the
    prebuilt artifacts and the L1 endpoint/key/portal address from step 1.
-   Deploys ZeracleToken, TokenBridge, FeeDistribution, PaymentEscrow, and an
-   (unfunded) SponsoredFPC. It runs with `ZERACLE_COMPLIANCE=off`: compliance
+   Deploys ZeracleToken, TokenBridge, FeeDistribution and PaymentEscrow. It
+   deploys no SponsoredFPC: user fees go through Aztec's canonical instance
+   (ZER-28), whose address is derived and recorded in `deployment.json`.
+   It runs with `ZERACLE_COMPLIANCE=off`: compliance
    verification (attestor + zkPassport + the bridge's exit enforcement) is not
    part of the testnet release, so no Compliance contract is deployed and the
    bridge's exit check is disabled — the stage asserts `complianceEnabled:
@@ -215,8 +217,13 @@ supported way to check everything short of broadcasting.
   build — `src/config/env.ts` refuses to start with any empty endpoint, so
   a clean `build:testnet` is the concrete signal that the sync step
   actually worked.
-- The SponsoredFPC is deployed but **unfunded** — top it up via the
-  chain-view admin panel before any sponsored user tx will go through.
+- User transactions pay their L2 fees through **Aztec's canonical
+  SponsoredFPC**, which Aztec deploys and funds (ZER-28). Zeracle deploys no
+  FPC on testnet and there is no top-up step: the chain-view admin panel and
+  `yarn fund:fpc` are both sandbox-only. The web app checks the sponsor's
+  fee-juice balance at boot and fails with an explicit "fee sponsor has no
+  funds" message if Aztec's instance is ever empty — that is an Aztec-side
+  operational issue, not something a Zeracle deploy can fix.
 - Read `docs/versions/260709/existing-limitations.md` §§1-2 before treating
   any of the above as feature-complete: the chain-server's sandbox-only
   infrastructure (on-demand block production, server-side account
