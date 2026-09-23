@@ -338,11 +338,19 @@ fi
 # 1, so a failure found later has already cost every Sepolia transaction.
 # Delegates to v1-l2 so there is ONE derivation path, shared with the deploy.
 step "Preflight: canonical SponsoredFPC (code + fee-juice balance)..."
+# npx tsx is already a hard dependency of this pipeline (Stage 2 runs
+# `yarn deploy:clean` -> `npx tsx scripts/deploy.ts`), so running it here adds
+# no new requirement — it just fails earlier if it cannot run at all.
 if ! CANONICAL_FPC_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx tsx scripts/check-canonical-fpc.ts 2>/dev/null); then
-  CANONICAL_FPC_MSG=$(echo "$CANONICAL_FPC_JSON" | jq -r '.message // "could not run the canonical SponsoredFPC preflight"' 2>/dev/null || echo "could not run the canonical SponsoredFPC preflight")
+  # `.message // "fallback"` does NOT cover empty input: with nothing on
+  # stdin jq emits nothing and the message would come out blank — which is
+  # precisely the case where the script never ran. Test for empty explicitly.
+  CANONICAL_FPC_MSG=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.message // empty' 2>/dev/null || true)
+  [ -n "$CANONICAL_FPC_MSG" ] || CANONICAL_FPC_MSG="Could not run the canonical SponsoredFPC preflight (cd $L2_DIR && npx tsx scripts/check-canonical-fpc.ts) — it produced no output. Check that v1-l2's dependencies are installed and that AZTEC_NODE_URL ($AZTEC_NODE_URL) is reachable."
   fail "$CANONICAL_FPC_MSG"
 fi
-ok "Canonical SponsoredFPC: $(echo "$CANONICAL_FPC_JSON" | jq -r '.address') (fee-juice balance $(echo "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
+CANONICAL_FPC_ADDRESS=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.address')
+ok "Canonical SponsoredFPC: $CANONICAL_FPC_ADDRESS (fee-juice balance $(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
 
 ok "L1_INBOX_ADDRESS:            $L1_INBOX_ADDRESS"
 ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
