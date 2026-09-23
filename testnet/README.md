@@ -145,6 +145,15 @@ safety net before real funds move). After confirmation it runs, in order:
    `VITE_ETH_CHAIN_ID`), and pins `VITE_COMPLIANCE_ENABLED=false` to match the
    L2 deploy.
 
+   `VITE_ETH_RPC_URL` is filled from **`PUBLIC_L1_RPC`, never
+   `TESTNET_L1_RPC_URL`** (ZER-29/R18). Vite inlines every `VITE_*` var into
+   the client bundle at build time, so the keyed broadcasting URL would
+   otherwise be readable by every browser that loads the app — and
+   `.env.testnet` is tracked in the `interfaces` repo, so it would also be one
+   `git add -A` from being committed. The stage asserts after writing that the
+   value equals `PUBLIC_L1_RPC` and carries no credentials, and blanks the line
+   if that ever fails.
+
 ## Deployer account
 
 Unlike the sandbox (which uses a canonical, pre-deployed test account already
@@ -172,7 +181,15 @@ before shipping, same as `.env`).
 
 ## Re-run semantics after a mid-pipeline failure
 
-Every stage fails loud and stops immediately — nothing retries silently.
+Every stage fails loud and stops immediately — nothing retries silently, with
+one deliberate exception (ZER-29): if a forge target exits non-zero but the
+contracts it records are all on-chain **and** `ETHERSCAN_API_KEY` was set, the
+script treats it as an Etherscan verification failure, `warn`s with a retry
+hint, and continues. Without the key, `--verify` is never attempted, so a
+non-zero exit is always treated as a real failure. The deploy itself is never
+assumed: Stage 1 re-reads every address it records, and for the bridge it also
+reads back all four wirings, before tolerating anything.
+
 Each `make` target is safe to re-run on its own once you've fixed the
 underlying problem:
 
@@ -235,6 +252,17 @@ supported way to check everything short of broadcasting.
   deploy will then record an address that may have no contract behind it.
 - To check it by hand against any node:
   `cd v1-l2 && AZTEC_RPC_HOST=<node url> yarn check:canonical-fpc`
+- Stage 0 also preflights the standard **HandshakeRegistry** (ZER-29/T11).
+  Cross-account private note discovery needs it published at the canonical
+  address baked into the circuits, and its absence is **silent** — transfers
+  land and the recipient simply never sees them. Whether Aztec's testnet has it
+  at genesis is unverified, which is why this is checked rather than assumed.
+  If it fires, publish it first and re-run:
+  `cd v1-l2 && AZTEC_RPC_HOST=<node url> yarn deploy:handshake` — that script
+  defaults to `http://localhost:8080`, so setting `AZTEC_RPC_HOST` explicitly
+  is what stops you publishing against a local sandbox instead. It is a
+  constructor-less universal deploy and is idempotent.
+  To check by hand: `cd v1-l2 && AZTEC_RPC_HOST=<node url> yarn check:handshake`
 - Read `docs/versions/260709/existing-limitations.md` §§1-2 before treating
   any of the above as feature-complete: the chain-server's sandbox-only
   infrastructure (on-demand block production, server-side account

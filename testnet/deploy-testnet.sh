@@ -112,6 +112,26 @@ bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$AZTEC_NODE_URL" \
   || fail "AZTEC_NODE_URL carries credentials — it is published in the public manifest chain-view loads. Use a public or origin-restricted endpoint. See $SCRIPT_DIR/.env.example."
 ok "PUBLIC_L1_RPC and AZTEC_NODE_URL carry no embedded credentials"
 
+# ZER-29: both values are substituted into `sed s|...|...|` replacement text
+# when Stage 3 fills the web env. In replacement text `&` means "the whole
+# match" and `\` starts an escape, so either character silently corrupts the
+# written value. The credential check above does not catch this: it only
+# rejects query params NAMED key/token/auth/secret, so a perfectly innocent
+# `...?chain=sepolia&format=json` passes it and then mangles.
+#
+# Checked HERE rather than at the sed, because Stage 3 runs after every
+# broadcast has been paid for — the Stage 3 assertion would catch it, but only
+# once the whole Sepolia suite, the L2 deploy and the one-shot setBasketManager
+# are already spent.
+assert_sed_safe() {
+  case "$2" in
+    *['&\|']*) fail "$1 contains one of & \\ | — Stage 3 substitutes it into sed replacement text when filling the web env, where those characters change the meaning of the replacement and corrupt the value. Use an endpoint URL without them." ;;
+  esac
+}
+assert_sed_safe PUBLIC_L1_RPC "$PUBLIC_L1_RPC"
+assert_sed_safe AZTEC_NODE_URL "$AZTEC_NODE_URL"
+ok "PUBLIC_L1_RPC and AZTEC_NODE_URL are safe to substitute into the web env"
+
 step "Preflight: checking L1 RPC chain id (must be Sepolia 11155111)..."
 if ! L1_CHAIN_ID=$(cast chain-id --rpc-url "$TESTNET_L1_RPC_URL" 2>&1); then
   fail "Could not reach TESTNET_L1_RPC_URL ($TESTNET_L1_RPC_URL): $L1_CHAIN_ID"
@@ -513,6 +533,43 @@ fi
 # it and move on.
 # ===========================================================================
 
+# ===========================================================================
+# ZER-29: shared plumbing for the "forge exited non-zero, but it may only be
+# Etherscan verification" tolerance used by Stages 1, 2b and 2c.
+# ===========================================================================
+
+# Is the tolerance even admissible? v1-l1/Makefile passes --verify only as
+# `$${ETHERSCAN_API_KEY:+--verify ...}`, so with no key forge is never asked to
+# verify — and a non-zero exit therefore CANNOT be a verification failure.
+# Warning-and-continuing in that configuration would wave through a real deploy
+# failure, which is the common case since the key is optional.
+require_verify_was_attempted() {
+  [ -n "${ETHERSCAN_API_KEY:-}" ] || fail "$1 failed and ETHERSCAN_API_KEY is unset, so --verify was never attempted (see v1-l1/Makefile) — a non-zero exit here is a real deploy failure, not an Etherscan one. Check the forge output above."
+}
+
+# Does an address have contract code? Empty output counts as NO code: `cast
+# code` can exit 0 with nothing on stdout, and `[ "$x" != "0x" ]` is true for
+# the empty string — which would read as "has code". Mirrors the -n test the
+# feed-code loop below already uses.
+has_code() {
+  local addr="${1:-}" code
+  [ -n "$addr" ] && [ "$addr" != "null" ] || return 1
+  code=$(cast code "$addr" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
+  [ -n "$code" ] && [ "$code" != "0x" ]
+}
+
+# Every address a stage's output file records must have code, not just the one
+# we happened to check. forge writes that file during execution, so a broadcast
+# that died partway still leaves a complete-looking JSON.
+require_all_have_code() {
+  local file="$1" what="$2"; shift 2
+  local f addr
+  for f in "$@"; do
+    addr=$(jq -r --arg f "$f" '.[$f] // ""' "$file" 2>/dev/null || true)
+    has_code "$addr" || fail "$what exited non-zero and .$f ($addr) in $file has no code on-chain — this is a real deploy failure, not an Etherscan one. Check the forge output above."
+  done
+}
+
 stage_l1_deploy() {
   cd "$L1_DIR"
 
@@ -527,13 +584,20 @@ stage_l1_deploy() {
     # The file existing is NOT proof the broadcast landed. Check on-chain code
     # at the recorded pool proxy: a non-zero forge exit after a successful
     # broadcast is most likely Etherscan verification failing.
-    POOL_PROXY_CHECK=$(jq -r '.liquidityPoolProxy // ""' deployments/local-testnet.json 2>/dev/null || true)
-    POOL_PROXY_CODE=$(cast code "$POOL_PROXY_CHECK" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
-    if [ -n "$POOL_PROXY_CHECK" ] && [ "$POOL_PROXY_CODE" != "0x" ]; then
-      warn "forge exited non-zero but the LiquidityPool proxy at $POOL_PROXY_CHECK has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployLocal.s.sol:DeployLocal --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
-    else
-      fail "make deploy-testnet-l1 failed before the broadcast landed (no code at the LiquidityPool proxy address). Check the forge output above."
-    fi
+    require_verify_was_attempted "make deploy-testnet-l1"
+    # DeployLocal broadcasts ~30 operations and the pool proxy is only the
+    # SECOND, so "the proxy has code" says almost nothing about whether the
+    # rest landed. A later broadcast dying (dropped RPC, nonce gap, underpriced)
+    # leaves the file written and the proxy deployed. That matters here more
+    # than anywhere else in the pipeline: Stage 2b hands L1 ownership to the
+    # GovernanceAuthority, after which a missed setPoolAddress can only be
+    # repaired through a proposal behind the timelock delay. So require code at
+    # EVERY address this stage records, including feeConverter, which is
+    # deployed last.
+    require_all_have_code deployments/local-testnet.json "make deploy-testnet-l1" \
+      liquidityPoolProxy liquidityPoolImpl depositAdapter withdrawalAdapter \
+      bridgeGuard treasury collateralReserve networkFund feeConverter
+    warn "forge exited non-zero but every contract deploy-testnet-l1 records has code on-chain — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy DEPLOYER_PRIVATE_KEY=\$DEPLOYER_PRIVATE_KEY DEPLOY_OUTPUT_JSON=deployments/local-testnet.json forge script script/DeployLocal.s.sol:DeployLocal --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
   fi
   [ -f deployments/local-testnet.json ] || fail "v1-l1/deployments/local-testnet.json was not created by 'make deploy-testnet-l1'. Check the forge output above for the actual failure."
   LIQUIDITY_POOL_PROXY=$(jq -r '.liquidityPoolProxy' deployments/local-testnet.json)
@@ -560,13 +624,14 @@ stage_l1_deploy() {
   rm -f deployments/tokens-testnet.json
   if ! ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
     make deploy-mocks-testnet; then
-    LUSD_CHECK=$(jq -r '.LUSD // ""' deployments/tokens-testnet.json 2>/dev/null || true)
-    LUSD_CODE=$(cast code "$LUSD_CHECK" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
-    if [ -n "$LUSD_CHECK" ] && [ "$LUSD_CODE" != "0x" ]; then
-      warn "forge exited non-zero but the mock LUSD at $LUSD_CHECK has code — the broadcast landed; most likely Etherscan verification failed. The feed-code checks below will still catch a genuinely partial deploy. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployMocks.s.sol:DeployMocks --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
-    else
-      fail "make deploy-mocks-testnet failed before the broadcast landed (no code at the mock LUSD address). Check the forge output above."
-    fi
+    require_verify_was_attempted "make deploy-mocks-testnet"
+    # All 8 tokens, not just LUSD. The feeds and the input-feed wiring are
+    # still covered more thoroughly by the two loops below, which run whether
+    # or not this tolerated the exit — so this only has to establish that the
+    # token leg landed.
+    require_all_have_code deployments/tokens-testnet.json "make deploy-mocks-testnet" \
+      LUSD USDT USDC DAI WETH WBTC PAXG PAXS
+    warn "forge exited non-zero but all 8 mock tokens have code — the broadcast landed; most likely Etherscan verification failed. The feed-code and input-price-feed checks below still have to pass. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy DEPLOYER_PRIVATE_KEY=\$DEPLOYER_PRIVATE_KEY DEPLOY_INPUT_JSON=deployments/local-testnet.json DEPLOY_OUTPUT_JSON=deployments/tokens-testnet.json forge script script/DeployMocks.s.sol:DeployMocks --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
   fi
   [ -f deployments/tokens-testnet.json ] || fail "v1-l1/deployments/tokens-testnet.json was not created by 'make deploy-mocks-testnet'. Check the forge output above for the actual failure."
   ok "LUSD:  $(jq -r '.LUSD' deployments/tokens-testnet.json)"
@@ -616,13 +681,32 @@ stage_l1_deploy() {
   if ! INBOX_ADDRESS="$L1_INBOX_ADDRESS" ROLLUP_ADDRESS="$L1_ROLLUP_ADDRESS" \
     ETH_RPC_URL="$TESTNET_L1_RPC_URL" DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
     make deploy-bridge-testnet; then
+    require_verify_was_attempted "make deploy-bridge-testnet"
     PORTAL_CHECK=$(jq -r '.tokenPortal // ""' deployments/bridge-testnet.json 2>/dev/null || true)
-    PORTAL_CODE=$(cast code "$PORTAL_CHECK" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
-    if [ -n "$PORTAL_CHECK" ] && [ "$PORTAL_CODE" != "0x" ]; then
-      warn "forge exited non-zero but the TokenPortal at $PORTAL_CHECK has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployBridge.s.sol:DeployBridge --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
-    else
-      fail "make deploy-bridge-testnet failed before the broadcast landed (no code at the TokenPortal address). Check the forge output above."
-    fi
+    has_code "$PORTAL_CHECK" || fail "make deploy-bridge-testnet failed and the TokenPortal ($PORTAL_CHECK) has no code on-chain — a real deploy failure, not an Etherscan one. Check the forge output above."
+    # Deploying the portal is only the FIRST of five broadcast operations.
+    # The other four wire it up, and nothing downstream checks them:
+    # assert_l2_bridge_portal_pairing only verifies the L2 side's recorded L1
+    # portal. A half-wired bridge that reaches Stage 2b becomes a governance
+    # proposal to fix, so read all four back here. A verification-only failure
+    # leaves every one of them correct, so this does not narrow the intended
+    # tolerance at all — it only refuses to extend it to a partial broadcast.
+    _wired() { cast call "$1" "$2" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo ""; }
+    BR_POOL=$(jq -r '.liquidityPoolProxy // ""' deployments/local-testnet.json 2>/dev/null || true)
+    BR_DEP=$(jq -r '.depositAdapter // ""' deployments/local-testnet.json 2>/dev/null || true)
+    BR_WDR=$(jq -r '.withdrawalAdapter // ""' deployments/local-testnet.json 2>/dev/null || true)
+    for pair in "$BR_POOL:aztecBridge()(address):LiquidityPool.aztecBridge" \
+                "$BR_DEP:tokenPortal()(address):DepositAdapter.tokenPortal" \
+                "$BR_WDR:aztecBridge()(address):WithdrawalAdapter.aztecBridge"; do
+      _addr="${pair%%:*}"; _rest="${pair#*:}"; _sig="${_rest%%:*}"; _label="${_rest##*:}"
+      _got=$(_wired "$_addr" "$_sig")
+      [ "$(printf '%s' "$_got" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$PORTAL_CHECK" | tr 'A-Z' 'a-z')" ] \
+        || fail "make deploy-bridge-testnet failed and $_label is '$_got', not the new TokenPortal $PORTAL_CHECK — the broadcast died partway through wiring, which Etherscan verification cannot cause. Check the forge output above."
+    done
+    _got_wdr=$(_wired "$PORTAL_CHECK" "withdrawalAdapter()(address)")
+    [ "$(printf '%s' "$_got_wdr" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$BR_WDR" | tr 'A-Z' 'a-z')" ] \
+      || fail "make deploy-bridge-testnet failed and TokenPortal.withdrawalAdapter is '$_got_wdr', not $BR_WDR — the broadcast died partway through wiring. Check the forge output above."
+    warn "forge exited non-zero but the TokenPortal at $PORTAL_CHECK has code and all four wirings read back correctly — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy DEPLOYER_PRIVATE_KEY=\$DEPLOYER_PRIVATE_KEY INBOX_ADDRESS=$L1_INBOX_ADDRESS ROLLUP_ADDRESS=$L1_ROLLUP_ADDRESS LIQUIDITY_POOL_PROXY=$BR_POOL DEPOSIT_ADAPTER=$BR_DEP WITHDRAWAL_ADAPTER=$BR_WDR DEPLOY_OUTPUT_JSON=deployments/bridge-testnet.json forge script script/DeployBridge.s.sol:DeployBridge --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
   fi
   [ -f deployments/bridge-testnet.json ] || fail "v1-l1/deployments/bridge-testnet.json was not created by 'make deploy-bridge-testnet'. Check the forge output above for the actual failure."
   TOKEN_PORTAL=$(jq -r '.tokenPortal' deployments/bridge-testnet.json)
@@ -824,10 +908,13 @@ stage_governance_handover() {
     # its mere existence is NOT proof the broadcast landed. Check on-chain
     # code at the recorded authority address instead: a non-zero forge exit
     # after a successful broadcast is most likely --verify (Etherscan) failing.
+    # ZER-29: with no Etherscan key, --verify was never attempted, so this
+    # cannot be a verification failure. Also uses has_code, which treats empty
+    # `cast code` output as NO code rather than as success.
+    require_verify_was_attempted "make deploy-governance-testnet"
     AUTH=$(jq -r '.authority // ""' deployments/governance-testnet.json 2>/dev/null || true)
-    CODE=$(cast code "$AUTH" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
-    if [ -n "$AUTH" ] && [ "$CODE" != "0x" ]; then
-      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployGovernance.s.sol:DeployGovernance --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    if has_code "$AUTH"; then
+      warn "forge exited non-zero but the GovernanceAuthority at $AUTH has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only by re-running the SAME make target with --resume added, keeping every env var the recipe sets: DeployGovernance reads GOV_PROPOSER, GOV_PROPOSER_2, GOV_GUARDIAN, GOV_TRANSITION_SECONDS, GOV_TIMELOCK_DELAY, LIQUIDITY_POOL_PROXY, DEPOSIT_ADAPTER, WITHDRAWAL_ADAPTER, BRIDGE_GUARD, TREASURY, COLLATERAL_RESERVE and more via vm.envAddress, so a bare forge invocation aborts immediately. See the deploy-governance-testnet recipe in v1-l1/Makefile"
     else
       fail "make deploy-governance-testnet failed before the broadcast landed (no code at the authority address). Check the forge output above; to resume a partial handover set GOV_AUTHORITY/GOV_TIMELOCK/GOV_VALIDATOR."
     fi
@@ -889,10 +976,11 @@ stage_basket_manager() {
     # existence is NOT proof the broadcast landed. Check on-chain code at the
     # recorded manager address instead: a non-zero forge exit after a successful
     # broadcast is most likely --verify (Etherscan) failing.
+    # ZER-29: same two corrections as Stage 2b above.
+    require_verify_was_attempted "make deploy-basket-manager-testnet"
     BM=$(jq -r '.basketManager // ""' deployments/basket-testnet.json 2>/dev/null || true)
-    BM_CODE=$(cast code "$BM" --rpc-url "$TESTNET_L1_RPC_URL" 2>/dev/null || echo 0x)
-    if [ -n "$BM" ] && [ "$BM_CODE" != "0x" ]; then
-      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only with: cd $L1_DIR && FOUNDRY_PROFILE=deploy forge script script/DeployBasketManager.s.sol:DeployBasketManager --rpc-url \$TESTNET_L1_RPC_URL --resume --verify --etherscan-api-key \$ETHERSCAN_API_KEY"
+    if has_code "$BM"; then
+      warn "forge exited non-zero but the BasketManager at $BM has code — the broadcast landed; most likely Etherscan verification failed. Retry verification only by re-running the SAME make target with --resume added, keeping every env var the recipe sets: DeployBasketManager reads TOKEN_PORTAL, LIQUIDITY_POOL_PROXY, GOV_AUTHORITY, GOV_PROPOSER and the four BASKET_* window/floor values via vm.env*, so a bare forge invocation aborts immediately. See the deploy-basket-manager-testnet recipe in v1-l1/Makefile"
       warn "NOTE on --libraries: BasketManager needs NONE (it only reads compile-time constants from BasketCompositionLib), so a library flag will not fix a failure here. The LiquidityPool IMPLEMENTATION is the contract that does need --libraries, and the usual cause of ITS verification failing is a STALE basketCompositionLib: the link is per-implementation, so a UUPS upgrade redeploys the implementation and may relink it against a newly deployed library, leaving the recorded value describing a library the live pool no longer uses. Nothing asserts that value is current — re-read the link target Upgrade.s.sol logs after every upgrade and refresh local-testnet.json + the manifest before verifying."
     else
       fail "make deploy-basket-manager-testnet failed before the broadcast landed (no code at the manager address). Check the forge output above; to resume a partial wiring set BASKET_MANAGER to the manager this run deployed."
@@ -1135,8 +1223,15 @@ MANIFEST
   WEB_RPC_VALUE=$(grep '^VITE_ETH_RPC_URL=' "$WEB_ENV" | head -1 | cut -d= -f2-)
   [ -n "$WEB_RPC_VALUE" ] || fail "$WEB_ENV's VITE_ETH_RPC_URL is empty after sync — the web app cannot reach L1. Check the sed above."
   [ "$WEB_RPC_VALUE" = "$PUBLIC_L1_RPC" ] || fail "$WEB_ENV's VITE_ETH_RPC_URL does not match PUBLIC_L1_RPC after sync. Vite inlines VITE_* into the client bundle, so this must be the keyless public RPC and nothing else. Check the sed above."
-  bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$WEB_RPC_VALUE" >/dev/null \
-    || fail "$WEB_ENV's VITE_ETH_RPC_URL carries credentials after sync — it would ship in the web bundle. This must never happen; check the sed above and PUBLIC_L1_RPC."
+  if ! bash "$SCRIPT_DIR/../lib/public-manifest.sh" --check-url "$WEB_RPC_VALUE" >/dev/null; then
+    # Blank the line before dying. $WEB_ENV is a TRACKED file in the interfaces
+    # repo, so exiting with the credential still written leaves it one
+    # `git add -A` from being committed — the exact outcome this assertion
+    # exists to prevent. lib/public-manifest.sh does the same for its own
+    # output (temp file + rm on refusal).
+    sed -i "s|^VITE_ETH_RPC_URL=.*|VITE_ETH_RPC_URL=|" "$WEB_ENV" || true
+    fail "$WEB_ENV's VITE_ETH_RPC_URL carried credentials after sync — it would ship in the web bundle. The line has been blanked; check the sed above and PUBLIC_L1_RPC before re-running."
+  fi
   ok "VITE_AZTEC_PXE_URL, VITE_AZTEC_NODE_URL, VITE_ETH_CHAIN_ID filled; VITE_ETH_RPC_URL set to the keyless PUBLIC_L1_RPC and asserted credential-free; VITE_COMPLIANCE_ENABLED=false"
 
   step "Testnet deploy summary"
