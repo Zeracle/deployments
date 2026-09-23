@@ -363,7 +363,8 @@ if [ -f "$PENDING_CLAIM_FILE" ]; then
   warn "Stage 2 will REUSE the claim a previous run already bridged on L1 rather than bridging again,"
   warn "so the deployer fee-asset balance gate is skipped for this run."
   warn "That file holds the claim SECRET: keep it private, never commit or ship it. It is cleared"
-  warn "automatically once the claim is spent by the SponsoredFPC deploy."
+  warn "automatically once the claim is spent by the first L2 deploy (ZER-28: the ZeracleToken"
+  warn "deploy on testnet, since testnet no longer deploys a SponsoredFPC of its own)."
 else
   FEE_ASSET_REQUIRED="${L1_FEE_ASSET_BRIDGE_AMOUNT:-1000000000000000000}"
   [[ "$FEE_ASSET_REQUIRED" =~ ^[0-9]+$ ]] || fail "L1_FEE_ASSET_BRIDGE_AMOUNT ($FEE_ASSET_REQUIRED) must be a base-10 integer (base units of the fee-juice token). See $SCRIPT_DIR/.env.example."
@@ -661,7 +662,7 @@ stage_l2_deploy() {
   ok "TokenBridge:     $(jq -r '.contracts.tokenBridge' deployment.json)"
   ok "FeeDistribution: $(jq -r '.contracts.feeDistribution' deployment.json)"
   ok "PaymentEscrow:   $(jq -r '.contracts.paymentEscrow' deployment.json)"
-  ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (deployed but UNFUNDED — top up via the chain-view admin panel before any sponsored tx will go through)"
+  ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (Aztec's canonical instance — deployed and funded by Aztec; Zeracle deploys none here and has no funding step to run)"
   ok "Deployer:        $(jq -r '.deployer' deployment.json)"
   ok "Deployer keys:   $DEPLOYER_ACCOUNT_FILE (BACK THIS UP — never commit/ship it)"
   ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; no on-chain deployment needed: initializerless, sweep pays via the sponsored FPC)"
@@ -1033,7 +1034,7 @@ MANIFEST
     TokenBridge:        $(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")
     FeeDistribution:    $(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")
     PaymentEscrow:      $(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")
-    SponsoredFPC:       $(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY") (UNFUNDED)
+    SponsoredFPC:       $(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY") (Aztec canonical, Aztec-funded)
 
   Endpoints:
     TESTNET_L1_RPC_URL: $TESTNET_L1_RPC_URL
