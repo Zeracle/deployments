@@ -332,6 +332,46 @@ ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
 ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
 ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
 
+# ZER-28 (T7): user fees on testnet ride on Aztec's canonical SponsoredFPC,
+# whose address Stage 2 DERIVES rather than looks up (contract class id + salt
+# 0 + zero deployer). The class id moves between aztec versions, so a mismatch
+# yields a well-formed address with no contract behind it — Stage 2 would
+# record it, the deploy would look completely successful, and every browser
+# would fail at boot. The version gate above catches the common cause, but it
+# compares the SDK to the node, not the FPC to the chain, so check the chain
+# too. Here rather than in Stage 2: the pipeline has no resume flag for Stage
+# 1, so a failure found later has already cost every Sepolia transaction.
+# Delegates to v1-l2 so there is ONE derivation path, shared with the deploy.
+#
+# `npx --yes`: without it npx prompts to install tsx, and with stderr
+# suppressed that prompt is invisible and reads as a hang. tsx is already a
+# hard dependency of this pipeline (Stage 2 runs `yarn deploy:clean` ->
+# `npx tsx scripts/deploy.ts`), so this adds no new requirement.
+step "Preflight: canonical SponsoredFPC (code + fee-juice balance)..."
+if ! CANONICAL_FPC_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx --yes tsx scripts/check-canonical-fpc.ts 2>/dev/null); then
+  # `.message // "fallback"` does NOT cover empty input: with nothing on
+  # stdin jq emits nothing and the message would come out blank — which is
+  # precisely the case where the script never ran. Test for empty explicitly.
+  CANONICAL_FPC_MSG=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.message // empty' 2>/dev/null || true)
+  [ -n "$CANONICAL_FPC_MSG" ] || CANONICAL_FPC_MSG="Could not run the canonical SponsoredFPC preflight (cd $L2_DIR && npx --yes tsx scripts/check-canonical-fpc.ts) — it produced no output. Check that v1-l2's dependencies are installed and that AZTEC_NODE_URL ($AZTEC_NODE_URL) is reachable."
+  # --force-version means "I know the node and SDK disagree, proceed anyway".
+  # A version disagreement is the most likely reason this check fails, so
+  # hard-aborting here would silently strip that override of its meaning.
+  if [ "$FORCE_VERSION" = true ]; then
+    warn "Canonical SponsoredFPC preflight FAILED — continuing anyway due to --force-version."
+    warn "$CANONICAL_FPC_MSG"
+    warn "If this is wrong, Stage 2 records an FPC address with no contract behind it and every user tx fails at boot."
+    # Carry the override into Stage 2, whose own preflight would otherwise
+    # abort the deploy and quietly revoke what was just granted here.
+    export ZERACLE_ALLOW_UNVERIFIED_FPC=1
+  else
+    fail "$CANONICAL_FPC_MSG"
+  fi
+else
+  CANONICAL_FPC_ADDRESS=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.address')
+  ok "Canonical SponsoredFPC: $CANONICAL_FPC_ADDRESS (fee-juice balance $(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
+fi
+
 # T5-R9: Stage 2 (v1-l2/scripts/deploy.ts) bridges the deployer's OWN L1
 # fee-asset balance non-mint — a real network has no faucet. Stage 2 only runs
 # after every Stage 1 Sepolia tx has spent gas, and the pipeline has no resume
@@ -363,7 +403,8 @@ if [ -f "$PENDING_CLAIM_FILE" ]; then
   warn "Stage 2 will REUSE the claim a previous run already bridged on L1 rather than bridging again,"
   warn "so the deployer fee-asset balance gate is skipped for this run."
   warn "That file holds the claim SECRET: keep it private, never commit or ship it. It is cleared"
-  warn "automatically once the claim is spent by the SponsoredFPC deploy."
+  warn "automatically once the claim is spent by the first L2 deploy (ZER-28: the ZeracleToken"
+  warn "deploy on testnet, since testnet no longer deploys a SponsoredFPC of its own)."
 else
   FEE_ASSET_REQUIRED="${L1_FEE_ASSET_BRIDGE_AMOUNT:-1000000000000000000}"
   [[ "$FEE_ASSET_REQUIRED" =~ ^[0-9]+$ ]] || fail "L1_FEE_ASSET_BRIDGE_AMOUNT ($FEE_ASSET_REQUIRED) must be a base-10 integer (base units of the fee-juice token). See $SCRIPT_DIR/.env.example."
@@ -661,7 +702,7 @@ stage_l2_deploy() {
   ok "TokenBridge:     $(jq -r '.contracts.tokenBridge' deployment.json)"
   ok "FeeDistribution: $(jq -r '.contracts.feeDistribution' deployment.json)"
   ok "PaymentEscrow:   $(jq -r '.contracts.paymentEscrow' deployment.json)"
-  ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (deployed but UNFUNDED — top up via the chain-view admin panel before any sponsored tx will go through)"
+  ok "SponsoredFPC:    $(jq -r '.contracts.sponsoredFpc' deployment.json) (Aztec's canonical instance — deployed and funded by Aztec; Zeracle deploys none here and has no funding step to run)"
   ok "Deployer:        $(jq -r '.deployer' deployment.json)"
   ok "Deployer keys:   $DEPLOYER_ACCOUNT_FILE (BACK THIS UP — never commit/ship it)"
   ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; no on-chain deployment needed: initializerless, sweep pays via the sponsored FPC)"
@@ -1033,7 +1074,7 @@ MANIFEST
     TokenBridge:        $(jq -r '.contracts.tokenBridge' "$L2_DEPLOY")
     FeeDistribution:    $(jq -r '.contracts.feeDistribution' "$L2_DEPLOY")
     PaymentEscrow:      $(jq -r '.contracts.paymentEscrow' "$L2_DEPLOY")
-    SponsoredFPC:       $(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY") (UNFUNDED)
+    SponsoredFPC:       $(jq -r '.contracts.sponsoredFpc' "$L2_DEPLOY") (Aztec canonical, Aztec-funded)
 
   Endpoints:
     TESTNET_L1_RPC_URL: $TESTNET_L1_RPC_URL
