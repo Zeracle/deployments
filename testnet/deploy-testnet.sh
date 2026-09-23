@@ -327,6 +327,23 @@ else
   ok "Node version matches local SDK version ($NODE_VERSION)"
 fi
 
+# ZER-28 (T7): user fees on testnet ride on Aztec's canonical SponsoredFPC,
+# whose address Stage 2 DERIVES rather than looks up (contract class id + salt
+# 0 + zero deployer). The class id moves between aztec versions, so a mismatch
+# yields a well-formed address with no contract behind it — Stage 2 would
+# record it, the deploy would look completely successful, and every browser
+# would fail at boot. The version gate above catches the common cause, but it
+# compares the SDK to the node, not the FPC to the chain, so check the chain
+# too. Here rather than in Stage 2: the pipeline has no resume flag for Stage
+# 1, so a failure found later has already cost every Sepolia transaction.
+# Delegates to v1-l2 so there is ONE derivation path, shared with the deploy.
+step "Preflight: canonical SponsoredFPC (code + fee-juice balance)..."
+if ! CANONICAL_FPC_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx tsx scripts/check-canonical-fpc.ts 2>/dev/null); then
+  CANONICAL_FPC_MSG=$(echo "$CANONICAL_FPC_JSON" | jq -r '.message // "could not run the canonical SponsoredFPC preflight"' 2>/dev/null || echo "could not run the canonical SponsoredFPC preflight")
+  fail "$CANONICAL_FPC_MSG"
+fi
+ok "Canonical SponsoredFPC: $(echo "$CANONICAL_FPC_JSON" | jq -r '.address') (fee-juice balance $(echo "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
+
 ok "L1_INBOX_ADDRESS:            $L1_INBOX_ADDRESS"
 ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
 ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
