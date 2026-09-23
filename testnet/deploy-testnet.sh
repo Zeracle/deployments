@@ -327,6 +327,11 @@ else
   ok "Node version matches local SDK version ($NODE_VERSION)"
 fi
 
+ok "L1_INBOX_ADDRESS:            $L1_INBOX_ADDRESS"
+ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
+ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
+ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
+
 # ZER-28 (T7): user fees on testnet ride on Aztec's canonical SponsoredFPC,
 # whose address Stage 2 DERIVES rather than looks up (contract class id + salt
 # 0 + zero deployer). The class id moves between aztec versions, so a mismatch
@@ -337,25 +342,35 @@ fi
 # too. Here rather than in Stage 2: the pipeline has no resume flag for Stage
 # 1, so a failure found later has already cost every Sepolia transaction.
 # Delegates to v1-l2 so there is ONE derivation path, shared with the deploy.
+#
+# `npx --yes`: without it npx prompts to install tsx, and with stderr
+# suppressed that prompt is invisible and reads as a hang. tsx is already a
+# hard dependency of this pipeline (Stage 2 runs `yarn deploy:clean` ->
+# `npx tsx scripts/deploy.ts`), so this adds no new requirement.
 step "Preflight: canonical SponsoredFPC (code + fee-juice balance)..."
-# npx tsx is already a hard dependency of this pipeline (Stage 2 runs
-# `yarn deploy:clean` -> `npx tsx scripts/deploy.ts`), so running it here adds
-# no new requirement — it just fails earlier if it cannot run at all.
-if ! CANONICAL_FPC_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx tsx scripts/check-canonical-fpc.ts 2>/dev/null); then
+if ! CANONICAL_FPC_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx --yes tsx scripts/check-canonical-fpc.ts 2>/dev/null); then
   # `.message // "fallback"` does NOT cover empty input: with nothing on
   # stdin jq emits nothing and the message would come out blank — which is
   # precisely the case where the script never ran. Test for empty explicitly.
   CANONICAL_FPC_MSG=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.message // empty' 2>/dev/null || true)
-  [ -n "$CANONICAL_FPC_MSG" ] || CANONICAL_FPC_MSG="Could not run the canonical SponsoredFPC preflight (cd $L2_DIR && npx tsx scripts/check-canonical-fpc.ts) — it produced no output. Check that v1-l2's dependencies are installed and that AZTEC_NODE_URL ($AZTEC_NODE_URL) is reachable."
-  fail "$CANONICAL_FPC_MSG"
+  [ -n "$CANONICAL_FPC_MSG" ] || CANONICAL_FPC_MSG="Could not run the canonical SponsoredFPC preflight (cd $L2_DIR && npx --yes tsx scripts/check-canonical-fpc.ts) — it produced no output. Check that v1-l2's dependencies are installed and that AZTEC_NODE_URL ($AZTEC_NODE_URL) is reachable."
+  # --force-version means "I know the node and SDK disagree, proceed anyway".
+  # A version disagreement is the most likely reason this check fails, so
+  # hard-aborting here would silently strip that override of its meaning.
+  if [ "$FORCE_VERSION" = true ]; then
+    warn "Canonical SponsoredFPC preflight FAILED — continuing anyway due to --force-version."
+    warn "$CANONICAL_FPC_MSG"
+    warn "If this is wrong, Stage 2 records an FPC address with no contract behind it and every user tx fails at boot."
+    # Carry the override into Stage 2, whose own preflight would otherwise
+    # abort the deploy and quietly revoke what was just granted here.
+    export ZERACLE_ALLOW_UNVERIFIED_FPC=1
+  else
+    fail "$CANONICAL_FPC_MSG"
+  fi
+else
+  CANONICAL_FPC_ADDRESS=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.address')
+  ok "Canonical SponsoredFPC: $CANONICAL_FPC_ADDRESS (fee-juice balance $(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
 fi
-CANONICAL_FPC_ADDRESS=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.address')
-ok "Canonical SponsoredFPC: $CANONICAL_FPC_ADDRESS (fee-juice balance $(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
-
-ok "L1_INBOX_ADDRESS:            $L1_INBOX_ADDRESS"
-ok "L1_ROLLUP_ADDRESS:           $L1_ROLLUP_ADDRESS"
-ok "L1_REGISTRY_ADDRESS:         $L1_REGISTRY_ADDRESS"
-ok "L1_FEE_JUICE_PORTAL_ADDRESS: $L1_FEE_JUICE_PORTAL_ADDRESS"
 
 # T5-R9: Stage 2 (v1-l2/scripts/deploy.ts) bridges the deployer's OWN L1
 # fee-asset balance non-mint — a real network has no faucet. Stage 2 only runs

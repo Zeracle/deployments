@@ -226,10 +226,15 @@ supported way to check everything short of broadcasting.
   operational issue, not something a Zeracle deploy can fix.
 - The canonical FPC's address is **derived, not configured**, and the
   derivation includes the contract class id — which changes between aztec
-  versions. Stage 2 preflights it before any L1 spend and aborts if no
-  contract exists at the derived address. If that fires, check the node's
-  aztec version against the `@aztec/*` versions in `v1-l2/package.json`
-  first: it means the two disagree, not that anything needs funding.
+  versions. **Stage 0** preflights it, before any Sepolia broadcast, and
+  aborts if no contract exists at the derived address; Stage 2 repeats the
+  check as a second guard before it bridges. If either fires, check the
+  node's aztec version against the `@aztec/*` versions in
+  `v1-l2/package.json` first: it means the two disagree, not that anything
+  needs funding. `--force-version` downgrades both to warnings, and the
+  deploy will then record an address that may have no contract behind it.
+- To check it by hand against any node:
+  `cd v1-l2 && AZTEC_RPC_HOST=<node url> yarn check:canonical-fpc`
 - Read `docs/versions/260709/existing-limitations.md` §§1-2 before treating
   any of the above as feature-complete: the chain-server's sandbox-only
   infrastructure (on-demand block production, server-side account
