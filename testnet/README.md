@@ -224,6 +224,12 @@ supported way to check everything short of broadcasting.
   fee-juice balance at boot and fails with an explicit "fee sponsor has no
   funds" message if Aztec's instance is ever empty — that is an Aztec-side
   operational issue, not something a Zeracle deploy can fix.
+- The canonical FPC's address is **derived, not configured**, and the
+  derivation includes the contract class id — which changes between aztec
+  versions. Stage 2 preflights it before any L1 spend and aborts if no
+  contract exists at the derived address. If that fires, check the node's
+  aztec version against the `@aztec/*` versions in `v1-l2/package.json`
+  first: it means the two disagree, not that anything needs funding.
 - Read `docs/versions/260709/existing-limitations.md` §§1-2 before treating
   any of the above as feature-complete: the chain-server's sandbox-only
   infrastructure (on-demand block production, server-side account
