@@ -69,7 +69,10 @@ deployed L2 contract was gone.
 **Consequences**
 - A reboot loses the L2 chain. L1 survives — anvil's `--state` genuinely persists.
 - Recovery: remove `/data/deployment-manifest.json` and re-run `deploy-pi.sh`
-  so it takes the first-run branch (~30 min).
+  so it takes the first-run branch (~30 min). If L1 has sat idle for hours
+  (nothing mined while L2 was down), the sandbox refuses to start with
+  `Ethereum node is out of sync (last block synced N at T vs current time …)`;
+  seen 2026-09-24. Then use "Force a fresh chain" below, which also resets L1.
 - Do not restart `aztec-sandbox` casually. Treat it as destroying L2.
 
 Real persistence needs the node run in a resuming mode rather than
@@ -129,7 +132,10 @@ test a branch (syncing contract changes does not redeploy them).
   (`sudo systemctl stop block-producer chain-server aztec-sandbox anvil`),
   then remove `/data/deployment-manifest.json`, `/data/public-manifest.json`,
   and `/data/anvil/state.json`, and re-run `deploy-pi.sh` — it will take the
-  "first run" branch and deploy a fresh set of contracts.
+  "first run" branch and deploy a fresh set of contracts. If `pi.env` or a
+  drop-in changed, run `make -C deployments sync-pi provision-pi` first: the
+  units are rendered from them only at provision time. Every address changes,
+  so regenerate `.env.pi` afterwards (`make -C deployments web-env-pi`).
 
 ## Access
 
