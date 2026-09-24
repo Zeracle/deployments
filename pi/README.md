@@ -81,11 +81,14 @@ syncing from L1. That is a separate piece of work.
 `make -C deployments e2e-pi` (or `make e2e-pi` from v1-l2) runs
 `pi/e2e-pi.sh` on the box:
 
-1. **Chain up.** Any service inactive, or no `/data/deployment-manifest.json`
-   → `deploy-pi.sh` (resume, or a ~35 min first-run deploy).
-2. **Chain matches the manifest.** `v1-l2/deployment.json` and the manifest
-   must name the same FeeDistribution, it must exist on the L2 node, and the
-   TokenPortal must have code on anvil. An L2 reset (see "Known limitation"
+1. **Chain up.** No `/data/deployment-manifest.json`, or anvil/aztec-sandbox
+   inactive → `deploy-pi.sh` (resume, or a ~30–35 min first-run deploy).
+   Only chain-server/block-producer inactive → just starts them. Then waits
+   for the L2 node to answer.
+2. **Chain matches the manifest.** Every address the suite reads
+   (`v1-l2/deployment.json`, `v1-l1/deployments/{bridge,local}.json`) must
+   equal the manifest's, the FeeDistribution must exist on the L2 node, and
+   the TokenPortal must have code on anvil. An L2 reset (see "Known limitation"
    below) is **reported, not repaired**: the fix is a fresh chain, which
    changes every address.
 3. **Portal collateralised.** `scripts/bridge-deposit.ts --if-needed`
@@ -93,7 +96,7 @@ syncing from L1. That is a separate piece of work.
 4. **The suite**, with `ZERACLE_E2E_REQUIRE_SANDBOX=1` and any
    `ZERACLE_E2E_ALLOW_UNCOLLATERALISED` stripped, so green means it ran.
 
-It prints per-step timings. Measured 2026-09-24 on a live, collateralised
+It prints per-step timings, on failure too. Measured 2026-09-24 on a live, collateralised
 chain: chain-up 0 s, verify 0 s, collateral 15 s, suite 70 s, **total 85 s**.
 It runs whatever code is on the box: `make -C deployments sync-pi` first to
 test a branch (syncing contract changes does not redeploy them).

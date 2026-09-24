@@ -3,9 +3,12 @@
 # ZER-17: pi/e2e-pi.sh's pure parts, offline — no Pi, no chain, no ssh.
 #
 # What this pins:
-#   - manifests_agree: the suite's v1-l2/deployment.json and the Pi manifest
-#     must name the same FeeDistribution (ZER-75: a synced laptop copy once
-#     described another chain), compared case-insensitively.
+#   - manifests_agree: every address the suite reads (v1-l2/deployment.json,
+#     v1-l1/deployments/{bridge,local}.json) must equal the Pi manifest's
+#     (ZER-75: a synced laptop copy once described another chain),
+#     compared case-insensitively.
+#   - rpc_classify: a dead node or an error response is never read as
+#     "contract absent" (L2 reset) or as "has code".
 #   - run_suite: the strict switch is always on, and a lenient
 #     ZERACLE_E2E_ALLOW_UNCOLLATERALISED=1 left exported in the caller's shell
 #     cannot reach the suite. Either regression turns a green run back into
@@ -29,36 +32,62 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 FD_MIXED="0x1A3d7fffC402f41d9716c20f0302924e5fa572a356a577b905ff01973ab4ac44"
 FD_LOWER="0x1a3d7fffc402f41d9716c20f0302924e5fa572a356a577b905ff01973ab4ac44"
 FD_OTHER="0x0b7a43d2bf27ce641c0984632ce5f085e5c5a84efcdbdf815ac9f1ba43c5d07a"
-v1l2() { echo "{\"contracts\":{\"feeDistribution\":\"$1\"},\"l1\":{\"tokenPortal\":\"0xAbC0000000000000000000000000000000000dEf\"}}" > "$TMP/v1l2.json"; }
-manifest() { echo "{\"l2\":{\"contracts\":{\"feeDistribution\":\"$1\"}}}" > "$TMP/manifest.json"; }
-
-echo "TEST: sourcing the script does not run main"
-check "main is defined but did not run" "$(type -t main)" "function"
+PORTAL="0x1D1aEE6D5dC35F3c15E2D11083D0e59C026b64c4"
+POOL="0x0b48aF34f4c854F5ae1A3D587da471FeA45bAD52"
+OTHER_L1="0xAbC0000000000000000000000000000000000dEf"
+# A consistent set, as deploy-pi.sh leaves it; each case then breaks one file.
+fixtures() {
+  echo "{\"contracts\":{\"feeDistribution\":\"$FD_MIXED\"},\"l1\":{\"tokenPortal\":\"$PORTAL\"}}" > "$TMP/v1l2.json"
+  echo "{\"tokenPortal\":\"$PORTAL\"}" > "$TMP/bridge.json"
+  echo "{\"liquidityPoolProxy\":\"$POOL\"}" > "$TMP/local.json"
+  echo "{\"l2\":{\"contracts\":{\"feeDistribution\":\"$FD_LOWER\"}},\"l1\":{\"contracts\":{\"tokenPortal\":\"$PORTAL\",\"liquidityPoolProxy\":\"$POOL\"}}}" > "$TMP/manifest.json"
+}
+agree() { manifests_agree "$TMP/v1l2.json" "$TMP/bridge.json" "$TMP/local.json" "$TMP/manifest.json"; }
 
 echo "TEST: json_addr lowercases and returns empty for a missing path"
-v1l2 "$FD_MIXED"
+fixtures
 check "lowercased"         "$(json_addr "$TMP/v1l2.json" '.contracts.feeDistribution')" "$FD_LOWER"
-check "portal lowercased"  "$(json_addr "$TMP/v1l2.json" '.l1.tokenPortal')" "0xabc0000000000000000000000000000000000def"
 check "missing path empty" "$(json_addr "$TMP/v1l2.json" '.contracts.nope')" ""
 
 echo "TEST: manifests_agree"
-v1l2 "$FD_MIXED"; manifest "$FD_LOWER"
-manifests_agree "$TMP/v1l2.json" "$TMP/manifest.json" >/dev/null
-check "same address, different case -> agree" "$?" "0"
+fixtures; agree >/dev/null
+check "consistent set (mixed case) -> agree" "$?" "0"
 
-manifest "$FD_OTHER"
-out=$(manifests_agree "$TMP/v1l2.json" "$TMP/manifest.json"); st=$?
-check "different address -> disagree" "$st" "1"
+fixtures; echo "{\"l2\":{\"contracts\":{\"feeDistribution\":\"$FD_OTHER\"}},\"l1\":{\"contracts\":{\"tokenPortal\":\"$PORTAL\",\"liquidityPoolProxy\":\"$POOL\"}}}" > "$TMP/manifest.json"
+out=$(agree); st=$?
+check "L2 FeeDistribution differs -> disagree" "$st" "1"
 check "reason names both addresses" "$(echo "$out" | grep -c "$FD_LOWER.*$FD_OTHER")" "1"
 
-echo '{"l2":{"contracts":{}}}' > "$TMP/manifest.json"
-out=$(manifests_agree "$TMP/v1l2.json" "$TMP/manifest.json"); st=$?
+# ZER-75 / review I4: a sync can overwrite the v1-l1 manifests the suite reads.
+fixtures; echo "{\"tokenPortal\":\"$OTHER_L1\"}" > "$TMP/bridge.json"
+out=$(agree); st=$?
+check "bridge.json portal differs -> disagree" "$st" "1"
+check "reason names bridge.json" "$(echo "$out" | grep -c 'bridge.json')" "1"
+
+fixtures; echo "{\"liquidityPoolProxy\":\"$OTHER_L1\"}" > "$TMP/local.json"
+agree >/dev/null; check "local.json pool differs -> disagree" "$?" "1"
+
+fixtures; echo "{\"contracts\":{\"feeDistribution\":\"$FD_MIXED\"},\"l1\":{\"tokenPortal\":\"$OTHER_L1\"}}" > "$TMP/v1l2.json"
+agree >/dev/null; check "deployment.json portal differs -> disagree" "$?" "1"
+
+fixtures; echo '{"l2":{"contracts":{}}}' > "$TMP/manifest.json"
+out=$(agree); st=$?
 check "manifest without feeDistribution -> disagree" "$st" "1"
 check "reason names the manifest field" "$(echo "$out" | grep -c 'l2.contracts.feeDistribution')" "1"
 
-echo '{}' > "$TMP/v1l2.json"; manifest "$FD_LOWER"
-manifests_agree "$TMP/v1l2.json" "$TMP/manifest.json" >/dev/null; st=$?
-check "deployment.json without feeDistribution -> disagree" "$st" "1"
+fixtures; echo '{}' > "$TMP/v1l2.json"
+agree >/dev/null; check "deployment.json without feeDistribution -> disagree" "$?" "1"
+
+# Review I1/I2: a dead node, an error response and an absent contract all have
+# a null .result or none at all; only the last one means "L2 reset".
+echo "TEST: rpc_classify tells unreachable, error, absent and present apart"
+check "empty (curl failed) -> unreachable" "$(printf '' | rpc_classify)" "unreachable"
+check "non-JSON -> unreachable"           "$(echo '<html>502</html>' | rpc_classify)" "unreachable"
+check "error member -> error"             "$(echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}' | rpc_classify | cut -d' ' -f1)" "error"
+check "error keeps the message"           "$(echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}' | rpc_classify | grep -c '"message":"no"')" "1"
+check "result null -> null (absent)"      "$(echo '{"jsonrpc":"2.0","id":1,"result":null}' | rpc_classify)" "null"
+check "empty code -> ok 0x"               "$(echo '{"jsonrpc":"2.0","id":1,"result":"0x"}' | rpc_classify)" "ok 0x"
+check "real result -> ok"                 "$(echo '{"jsonrpc":"2.0","id":1,"result":"0x6080"}' | rpc_classify)" "ok 0x6080"
 
 echo "TEST: run_suite always runs strict, never lenient"
 mkdir -p "$TMP/bin"
