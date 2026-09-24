@@ -18,24 +18,33 @@ WEB_DIR := ../interfaces/apps/web
 
 .PHONY: help test \
         deploy-sandbox-local deploy-sandbox-local-skip-infra stop-sandbox-local stop-clean \
-        deploy deploy-skip-infra stop \
+        stop check-local-sandbox-allowed \
         deploy-sandbox-ec2 deploy-sandbox-ec2-apply \
         sync-pi provision-pi deploy-pi web-env-pi build-web-pi deploy-web-pi \
         deploy-testnet deploy-mainnet \
         chain-server chain-server-dev \
         fes fes-web fes-docs fes-chain stop-fes stop-fes-web stop-fes-docs stop-fes-chain
 
-## ----- Sandbox: local (this machine) -----
+## ----- Sandbox: local (this machine) — RETIRED -----
+#
+# Retired 2026-09-24: all testing runs on the Pi chain host (deploy-pi below).
+# A laptop deploy writes interfaces/apps/web/.env.local, which Vite loads in
+# every mode — including the Pi build — so it is refused unless explicitly
+# asked for. The script itself stays: deploy-pi.sh runs it headless on the Pi.
 
-deploy-sandbox-local: ## Full local sandbox deploy (starts Anvil + Sandbox)
+check-local-sandbox-allowed:
+	@test "$(ALLOW_LOCAL_SANDBOX)" = 1 || { \
+		echo "The laptop sandbox is retired: all testing runs on the Pi."; \
+		echo "  Pi chain:   make -C deployments deploy-pi"; \
+		echo "  Web env:    make -C deployments web-env-pi"; \
+		echo "Set ALLOW_LOCAL_SANDBOX=1 to run it anyway (writes interfaces/apps/web/.env.local)."; \
+		exit 1; }
+
+deploy-sandbox-local: check-local-sandbox-allowed ## RETIRED — local sandbox deploy; needs ALLOW_LOCAL_SANDBOX=1
 	./sandbox-local/deploy-sandbox.sh
 
-deploy: deploy-sandbox-local ## Alias for deploy-sandbox-local
-
-deploy-sandbox-local-skip-infra: ## Local sandbox deploy, skipping Anvil/Sandbox (already running)
+deploy-sandbox-local-skip-infra: check-local-sandbox-allowed ## RETIRED — as above, skipping Anvil/Sandbox start
 	./sandbox-local/deploy-sandbox.sh --skip-infra
-
-deploy-skip-infra: deploy-sandbox-local-skip-infra ## Alias for deploy-sandbox-local-skip-infra
 
 stop-sandbox-local: ## Stop the local sandbox stack (keep logs)
 	./sandbox-local/stop-sandbox.sh

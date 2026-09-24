@@ -37,11 +37,17 @@ in and run `make <target>`.
   prerequisites.
 
 Each environment dir owns its own deployment script(s), and the Makefile has
-per-env targets: `deploy-sandbox-local` (alias `deploy`),
-`deploy-sandbox-local-skip-infra` (alias `deploy-skip-infra`),
-`stop-sandbox-local` (alias `stop`), `stop-clean`, `deploy-sandbox-ec2`,
+per-env targets: `deploy-pi`, `web-env-pi`, `deploy-web-pi` (the Pi chain
+host, where all testing runs), `stop-sandbox-local` (alias `stop`),
+`stop-clean`, `deploy-sandbox-ec2`,
 `deploy-sandbox-ec2-apply`, `deploy-testnet`, `deploy-mainnet`, plus `test`
 for the offline shell tests. Run `make -C deployments help` for the full list.
+
+The laptop sandbox (`deploy-sandbox-local`, `deploy-sandbox-local-skip-infra`)
+is retired as of 2026-09-24 and refuses to run without `ALLOW_LOCAL_SANDBOX=1`:
+it writes `interfaces/apps/web/.env.local`, which Vite loads in every mode and
+so leaks into Pi builds. `sandbox-local/deploy-sandbox.sh` itself stays —
+`pi/deploy-pi.sh` runs it headless on the Pi.
 
 **Terminology:** sandbox != testnet. Both `sandbox-local` and `sandbox-ec2`
 run the Aztec *sandbox* (single-node, local); "testnet" only ever refers to
