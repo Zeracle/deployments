@@ -14,23 +14,28 @@
 # code) whether anything genuinely failed.
 #
 # skim() is deliberately NOT a step (ZER-18, owner decision 2026-09-24).
-# LiquidityPool.skim() sells the most-overweight leg to the CollateralReserve
-# when NAV is ABOVE its high-water mark — the opposite of cushion(). It cannot
-# succeed on any environment today, for three independent reasons (v1-l1):
+# LiquidityPool.skim() sells the most-overweight leg for the fee token and
+# sends the proceeds to the CollateralReserve when NAV is ABOVE its high-water
+# mark — the opposite of cushion(). It cannot succeed on any environment
+# today, for three independent reasons (v1-l1):
 #   1. No router is whitelisted: skim() reverts RouterNotWhitelisted
 #      (LiquidityPool.sol:1208) and no deploy script calls setSkimRouter (:1220).
 #   2. The high-water mark is never armed (hwmPerShare == 0, ZER-31), so
 #      cappedAssetValueUsd() returns V uncapped (:542) and excessUsd() (:551) is
 #      always 0 — BelowSkimFloor (:1211) even with a router.
-#   3. setSkimParams (:1229) is never called, so maxSlippageBps is 0 and any
-#      real swap would revert SkimSlippageTooHigh (CappedNavLib.sol:197).
+#   3. setSkimParams (:1229) is never called, so skimMaxSlippageBps is 0: minOut
+#      is the full oracle value and any swap with fees or price impact reverts
+#      SkimSlippageTooHigh (CappedNavLib.sol:197).
 # Measured on the Pi 2026-09-24: hwmPerShare 0, excessUsd 0, all skim params 0,
 # skimRouters(MockDexAggregator) false. Since the G3 handover the pool owner is
-# the governance authority, so fixing 1 and 3 on a live chain is a proposal.
+# the GovernanceAuthority, so fixing 1 and 3 on a live chain is an authority
+# execute() call — a timelock proposal once the admin phase has ended.
 # Revisit once ZER-31 arms the mark AND a router is chosen — together with
 # FeeConverter's, which is deferred for the same reason. MockDexAggregator's
 # swap() (pull tokenIn from caller, mint tokenOut to caller) is compatible with
-# skim()'s balance-delta check, so the sandbox needs no new mock when it lands.
+# skim()'s balance-delta check, so the sandbox needs no new mock when it lands —
+# provided swapData calls its swap(address,address,uint256,uint256,bytes)
+# selector directly (its fallback re-enters as itself, so the pool gets nothing).
 #
 # Pending relays (final review Important 2): a flush's L2->L1 messages can
 # only be relayed once its epoch is proven on L1, which on testnet often
