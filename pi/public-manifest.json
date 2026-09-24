@@ -4,11 +4,11 @@
     "id": "pi",
     "kind": "sandbox",
     "label": "Sandbox (Pi)",
-    "generatedAt": "2026-09-24T05:37:33Z",
+    "generatedAt": "2026-09-24T10:31:02Z",
     "sources": {
-      "v1-l1": "c675ceb",
-      "v1-l2": "93395e8",
-      "deployments": "a5a86a9"
+      "v1-l1": "96abeba",
+      "v1-l2": "3b6e8f3",
+      "deployments": "fe8bbeb"
     }
   },
   "endpoints": {
@@ -22,7 +22,7 @@
   },
   "l1": {
     "chainId": 31337,
-    "deployBlock": 42,
+    "deployBlock": 69,
     "contracts": {
       "liquidityPoolProxy": "0x0b48aF34f4c854F5ae1A3D587da471FeA45bAD52",
       "liquidityPoolImpl": "0x05Aa229Aec102f78CE0E852A812a388F076Aa555",
@@ -39,7 +39,7 @@
       "uniswapTwap": "0x59F2f1fCfE2474fD5F0b9BA1E73ca90b143Eb8d0",
       "complianceRegistry": null,
       "mockDexAggregator": "0xC6bA8C3233eCF65B761049ef63466945c362EdD2",
-      "feeAssetHandler": "0x0b306bf915c4d645ff596e518faf3f9669b97016"
+      "feeAssetHandler": "0x99bba657f2bbc93c02d617f8ba121cb8fc104acf"
     },
     "tokens": {
       "LUSD": {
@@ -88,27 +88,27 @@
       "proposers": [
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
       ],
-      "transitionAt": 1821764587,
+      "transitionAt": 1821782464,
       "timelockDelay": 3600,
       "executionWindow": 604800
     },
     "aztec": {
-      "rollup": "0x4ed7c70f96b99c776995fb64377f0d4ab3b0e1c1",
-      "inbox": "0x0665fbb86a3aceca91df68388ec4bbe11556ddce",
-      "registry": "0x610178da211fef7d417bc0e6fed39f05609ad788",
-      "feeJuicePortal": "0xfd05ee8687d4ca828ba3d26ef04b80dd1348e5bd",
-      "feeJuice": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "rollup": "0x4c5859f0f772848b2d91f1d83e2fe57935348029",
+      "inbox": "0x25bee23e489b9ec351a3f974c3050d1be60900fe",
+      "registry": "0xf5059a5d33d5853360d16c683c16e67980206f36",
+      "feeJuicePortal": "0x96a46097c4788a46cfa61d543f38eccb3b528655",
+      "feeJuice": "0x9e545e3c0baab3e08cdfd552c960a1050f373042",
       "nodeVersion": "5.2.0"
     }
   },
   "l2": {
     "contracts": {
-      "zeracleToken": "0x061bafa98fcadc4dcc39e750ad137c030440b1e164caeac13cd9d44991e3cb9a",
-      "tokenBridge": "0x1ed24329848444a1799f084cb37cfa1a962f0a785a43509ff4843679c695c002",
-      "feeDistribution": "0x1a3d7fffc402f41d9716c20f0302924e5fa572a356a577b905ff01973ab4ac44",
-      "paymentEscrow": "0x22de00e2776bed6e65f0f17ade55e0af7701ddf2623af033dd14149c66ba8147",
+      "zeracleToken": "0x2d0ba80fa798bd69578d0bf9173dcb45aaafd958d968387b603dea22e5f538f1",
+      "tokenBridge": "0x049375d709488596912d88ee6cac4342cfa8995ae737bd8a6afff6cd708c2e45",
+      "feeDistribution": "0x0cdfe6b256d77e2125da0be82f9b6d141e8fa6137277f0e251ac42a89182bb7d",
+      "paymentEscrow": "0x06a095b2b699cd301bca40a2127a7df066d9ee5a8ab4cbbc9ca86a4a1a9778e8",
       "sponsoredFpc": "0x20e22e53e37cf43003ffb23d117064b0c26c169397a1466f939a93c27a6b05b8",
-      "compliance": "0x22487899dd028d555a61fa013221bc73f24dfdd2deafca7066e50c68e8490ebe"
+      "compliance": "0x0e2dbc6865dd609b5e8b87be61364eda8d847531b938de6cfb671953d2c99ccf"
     },
     "complianceEnabled": true,
     "feeDistributionTestHelpers": true,
