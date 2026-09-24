@@ -4,11 +4,11 @@
     "id": "pi",
     "kind": "sandbox",
     "label": "Sandbox (Pi)",
-    "generatedAt": "2026-09-22T12:27:17Z",
+    "generatedAt": "2026-09-24T05:37:33Z",
     "sources": {
-      "v1-l1": "0e01f32",
-      "v1-l2": "ad5e346",
-      "deployments": "78a4dec"
+      "v1-l1": "c675ceb",
+      "v1-l2": "93395e8",
+      "deployments": "a5a86a9"
     }
   },
   "endpoints": {
@@ -88,7 +88,7 @@
       "proposers": [
         "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
       ],
-      "transitionAt": 1821616312,
+      "transitionAt": 1821764587,
       "timelockDelay": 3600,
       "executionWindow": 604800
     },
@@ -103,12 +103,12 @@
   },
   "l2": {
     "contracts": {
-      "zeracleToken": "0x0a0ed3821a9b1555fe03cfcc31d039a5db985dd4a474fffb1cdd75ab40dc5dc4",
-      "tokenBridge": "0x0ba0fbce3222ff5c7e2ef3c777fd4c671e3474b43d5fcf25c7b5e8618b1573b7",
-      "feeDistribution": "0x1afad497e3f0b582329c980377d1d23c482afc985e2eacd8eab5dfcbad04a6f8",
-      "paymentEscrow": "0x1f0e4ede5aff3158d33cfa779086ceeb7b13efee72c8054b651003346959902e",
+      "zeracleToken": "0x061bafa98fcadc4dcc39e750ad137c030440b1e164caeac13cd9d44991e3cb9a",
+      "tokenBridge": "0x1ed24329848444a1799f084cb37cfa1a962f0a785a43509ff4843679c695c002",
+      "feeDistribution": "0x1a3d7fffc402f41d9716c20f0302924e5fa572a356a577b905ff01973ab4ac44",
+      "paymentEscrow": "0x22de00e2776bed6e65f0f17ade55e0af7701ddf2623af033dd14149c66ba8147",
       "sponsoredFpc": "0x20e22e53e37cf43003ffb23d117064b0c26c169397a1466f939a93c27a6b05b8",
-      "compliance": "0x10f0ad13c4454f35ebbf8fb21313f8c2af50e3f76f6b9ed2d2dd357b21b1c069"
+      "compliance": "0x22487899dd028d555a61fa013221bc73f24dfdd2deafca7066e50c68e8490ebe"
     },
     "complianceEnabled": true,
     "feeDistributionTestHelpers": true,
