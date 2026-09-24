@@ -20,7 +20,7 @@ WEB_DIR := ../interfaces/apps/web
         deploy-sandbox-local deploy-sandbox-local-skip-infra stop-sandbox-local stop-clean \
         stop check-local-sandbox-allowed \
         deploy-sandbox-ec2 deploy-sandbox-ec2-apply \
-        sync-pi provision-pi deploy-pi web-env-pi build-web-pi deploy-web-pi \
+        sync-pi provision-pi deploy-pi e2e-pi web-env-pi build-web-pi deploy-web-pi \
         deploy-testnet deploy-mainnet \
         chain-server chain-server-dev \
         fes fes-web fes-docs fes-chain stop-fes stop-fes-web stop-fes-docs stop-fes-chain
@@ -76,6 +76,14 @@ provision-pi: ## One-time idempotent host setup on the Pi (swap, docker, node, f
 
 deploy-pi: ## Deploy (or resume) the chain on the Pi
 	ssh $${PI_HOST:-pi} 'bash /opt/zeracle/deployments/pi/deploy-pi.sh'
+
+# ZER-17. Brings the chain up if needed, checks it matches its manifest,
+# collateralises the portal if needed, then runs v1-l2 fees.flush-claim with
+# ZERACLE_E2E_REQUIRE_SANDBOX=1 — on the Pi, because the sandbox tools refuse
+# non-localhost endpoints. Runs the code already on the box: sync-pi first to
+# test a branch.
+e2e-pi: ## Run the real-Outbox fee round-trip e2e on the Pi (see pi/e2e-pi.sh)
+	ssh -o ServerAliveInterval=30 $${PI_HOST:-pi} 'bash /opt/zeracle/deployments/pi/e2e-pi.sh'
 
 web-env-pi: ## Regenerate interfaces/apps/web/.env.pi from the Pi deployment manifest
 	./pi/gen-web-env.sh
@@ -142,9 +150,9 @@ stop-fes-chain: ## Stop only the chain view
 # rather than executing them, and never touch Sepolia, the Aztec testnet or the
 # EC2 sandbox. One exception worth knowing: install-mock-feeds-chain-guard
 # binds local port 8597 for a stub RPC (still no outside network).
-test: ## Run the offline shell tests (lib/test + sandbox-local/test)
+test: ## Run the offline shell tests (lib/test + sandbox-local/test + pi/test)
 	@fail=0; \
-	for t in lib/test/*.test.sh sandbox-local/test/*.test.sh; do \
+	for t in lib/test/*.test.sh sandbox-local/test/*.test.sh pi/test/*.test.sh; do \
 	  [ -f "$$t" ] || continue; \
 	  echo "== $$t"; \
 	  bash "$$t" || fail=1; \
