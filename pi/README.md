@@ -99,8 +99,11 @@ syncing from L1. That is a separate piece of work.
 4. **The suite**, with `ZERACLE_E2E_REQUIRE_SANDBOX=1` and any
    `ZERACLE_E2E_ALLOW_UNCOLLATERALISED` stripped, so green means it ran.
 
-It prints per-step timings, on failure too. Measured 2026-09-24 on a live, collateralised
-chain: chain-up 0 s, verify 0 s, collateral 15 s, suite 70 s, **total 85 s**.
+It prints per-step timings, on failure too. Measured 2026-09-25 on a live, collateralised
+chain after ZER-81: chain-up 1 s, verify 0 s, collateral 12 s, suite 40 s, **total 53 s**.
+A suite time that grows run over run means the shared `v1-l2/aztec-wallet-data` store is
+filling with per-run accounts again (ZER-81: the block producer's throwaway accounts once
+pushed it to ~14 min); the store is disposable — `deploy-pi.sh` deletes it on every run.
 It runs whatever code is on the box: `make -C deployments sync-pi` first to
 test a branch (syncing contract changes does not redeploy them).
 

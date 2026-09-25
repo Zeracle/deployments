@@ -157,10 +157,11 @@ sudo sed "$SUBST" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
 for u in zeracle-keeper.service zeracle-keeper.timer; do
   sudo install -m 644 "$REPO/deployments/lib/keeper/$u" "/etc/systemd/system/$u"
 done
-# The embedded wallet's LMDB store is created by whichever service touches it
-# first — chain-server runs as root, so the dir lands root-owned and a manual
-# `sandbox-block-producer.sh` run as admin dies with "mdb_env_open: 13". Create
-# it up front owned by the admin user; root can still write to it.
+# The shared v1-l2 embedded-wallet LMDB store (used by the keeper, deploy and
+# e2e scripts) is created by whichever process touches it first — anything
+# running as root would leave it root-owned, and a later run as admin dies with
+# "mdb_env_open: 13". Create it up front owned by the admin user; root can
+# still write to it. (The block producer stopped using it in ZER-81.)
 sudo mkdir -p "$REPO/v1-l2/aztec-wallet-data"
 sudo chown -R "${SUDO_USER:-$USER}":"${SUDO_USER:-$USER}" "$REPO/v1-l2/aztec-wallet-data"
 ok "aztec-wallet-data owned by ${SUDO_USER:-$USER}"
