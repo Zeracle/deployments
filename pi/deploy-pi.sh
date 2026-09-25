@@ -48,7 +48,7 @@ _start_rpc_proxy() {
 # The fee keeper (ZER-16) must not run mid-deploy: its sweep and flush would hit
 # a chain that is half-deployed or about to be replaced. The timer is started
 # again at the end, once keeper.env is current.
-# shellcheck source=keeper-ctl.sh
+# shellcheck source=keeper-ctl.sh disable=SC1091
 . "$SCRIPT_DIR/keeper-ctl.sh"
 KEEPER_STATE="/var/lib/zeracle-keeper"
 if keeper_installed; then

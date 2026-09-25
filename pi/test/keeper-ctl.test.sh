@@ -33,7 +33,7 @@ printf '#!/usr/bin/env bash\n"$@"\n' > "$TMP/bin/sudo"
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/sudo"
 export PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/log" STUB_COUNT="$TMP/count"
 export KEEPER_WAIT_POLL_SECS=0
-# shellcheck source=../keeper-ctl.sh
+# shellcheck source=../keeper-ctl.sh disable=SC1091
 . "$SCRIPT"
 sleep() { :; }   # the poll interval is 0 anyway; keep the test instant
 

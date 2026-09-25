@@ -70,8 +70,8 @@ for case_ in '{}' '{"zeracleToken":null}' '{"zeracleToken":"0x1234"}' \
   check "rejects $case_" "$st" 1
   if cmp -s "$TMP/keeper.env" "$TMP/good.env"; then ok "keeps the last good file ($case_)"; else bad "overwrote the env file ($case_)"; fi
 done
-for bad_l1 in "{\"tokenPortal\":\"$PORTAL\"}" "$(echo "$L1_GOOD" | sed "s/$POOL/0x1234/")" \
-  "$(echo "$L1_GOOD" | sed "s/$TREAS/$FD/")"; do
+for bad_l1 in "{\"tokenPortal\":\"$PORTAL\"}" "${L1_GOOD//$POOL/0x1234}" \
+  "${L1_GOOD//$TREAS/$FD}"; do
   manifest "$(L2_GOOD)" "$bad_l1"
   st=0; bash "$SCRIPT" "$TMP/m.json" "$TMP/keeper.env" >/dev/null 2>&1 || st=$?
   check "rejects a manifest with a missing or malformed L1 address" "$st" 1

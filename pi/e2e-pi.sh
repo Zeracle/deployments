@@ -90,7 +90,7 @@ elapsed(){ echo "$(( $(date +%s) - $1 ))s"; }
 # wait for any run in flight to finish (never kill it: keeper-ctl.sh), then
 # restart the timer on exit — failures included — only if it was running
 # before, or a deploy this run made succeeded.
-# shellcheck source=keeper-ctl.sh
+# shellcheck source=keeper-ctl.sh disable=SC1091
 . "$SCRIPT_DIR/keeper-ctl.sh"
 KEEPER_WAS_ACTIVE=""
 keeper_pause(){
