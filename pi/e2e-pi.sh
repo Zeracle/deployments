@@ -85,6 +85,26 @@ rpc(){ curl -fsS -m 10 -X POST -H 'content-type: application/json' \
 
 elapsed(){ echo "$(( $(date +%s) - $1 ))s"; }
 
+# The fee keeper (ZER-16) sweeps and flushes the same fees this suite does, so a
+# timer run landing mid-suite would take them from under it. Stop the timer and
+# wait for any run in flight to finish (never kill it: keeper-ctl.sh), then
+# restart the timer on exit — failures included — only if it was running
+# before, or a deploy this run made succeeded.
+# shellcheck source=keeper-ctl.sh disable=SC1091
+. "$SCRIPT_DIR/keeper-ctl.sh"
+KEEPER_WAS_ACTIVE=""
+keeper_pause(){
+  keeper_installed || return 0
+  systemctl is-active --quiet zeracle-keeper.timer && KEEPER_WAS_ACTIVE=1
+  keeper_quiesce || fail "a keeper run is still in flight; rerun once it finishes"
+  ok "keeper paused for the suite"
+}
+keeper_resume(){
+  [ -n "$KEEPER_WAS_ACTIVE" ] || return 0
+  keeper_installed || return 0
+  sudo systemctl start zeracle-keeper.timer || echo "  ! could not restart zeracle-keeper.timer"
+}
+
 # Timings print on every exit, failures included: a slow failure is still a
 # measured duration.
 TIMINGS=""; T0=""
@@ -95,7 +115,8 @@ main(){
   . "$SCRIPT_DIR/pi.env"
   local V1L2="$REPO/v1-l2" V1L1="$REPO/v1-l1" MANIFEST="$DATA_MOUNT/deployment-manifest.json"
   local t s
-  T0=$(date +%s); trap print_timings EXIT
+  T0=$(date +%s); trap 'keeper_resume; print_timings' EXIT
+  keeper_pause
 
   step "1/4 Chain up"
   t=$(date +%s)
@@ -104,7 +125,12 @@ main(){
   for s in chain-server block-producer; do systemctl is-active --quiet "$s" || app_down="$app_down $s"; done
   if [ ! -f "$MANIFEST" ] || [ -n "$core_down" ]; then
     echo "  manifest $([ -f "$MANIFEST" ] && echo present || echo absent)${core_down:+; inactive:$core_down} -> deploy-pi.sh"
-    bash "$SCRIPT_DIR/deploy-pi.sh"
+    # Not restarted against a chain whose deploy failed: cleared until it succeeds.
+    KEEPER_WAS_ACTIVE=""
+    ZERACLE_KEEPER_HOLD=1 bash "$SCRIPT_DIR/deploy-pi.sh"
+    # deploy-pi.sh would have started the timer (if enabled); keeper_resume
+    # does it instead, under the same enabled check.
+    systemctl is-enabled --quiet zeracle-keeper.timer && KEEPER_WAS_ACTIVE=1
   elif [ -n "$app_down" ]; then
     echo "  inactive:$app_down -> starting them (chain untouched)"
     # shellcheck disable=SC2086  # word-splitting the unit list is intended

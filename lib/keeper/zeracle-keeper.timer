@@ -1,12 +1,21 @@
-# D-b keeper systemd timer — TEMPLATE ONLY. Not installed or started by any
-# script in this repo; see zeracle-keeper.service in this same directory.
+# D-b keeper systemd timer. Installed and enabled on the Pi chain host by
+# deployments/pi/provision-pi.sh (ZER-16); see zeracle-keeper.service in this
+# same directory and README.md for the decision record.
 [Unit]
 Description=Run the Zeracle fee keeper on a schedule (D-b)
 
 [Timer]
-# D-c argues for a minimum-batch interval; weekly is the runbook's stated
-# floor recommendation (owner decision #5, testnet-readiness-review.md §10).
-OnCalendar=weekly
+# Daily (owner decision 2026-09-25, ZER-16; supersedes the weekly floor from
+# owner decision #5, testnet-readiness-review.md §10). The weekly floor was
+# chosen against a ~2 h proof window that would have made anything slower than
+# ~2 h a risk; measured on the Pi, Aztec 5.2.0 has no such window (README.md),
+# so cadence only sets how stale un-converted fees get. Daily keeps the Pi's
+# fee funds current without a keeper run competing with every test for L2
+# blocks (one Pi block takes ~2.5 min).
+OnCalendar=daily
+# Spread the start so a reboot near midnight does not stack it on top of the
+# chain services coming up.
+RandomizedDelaySec=15min
 Persistent=true
 
 [Install]

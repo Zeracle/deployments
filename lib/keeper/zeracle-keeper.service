@@ -1,17 +1,20 @@
-# D-b keeper systemd unit — TEMPLATE ONLY. Not installed or started by any
-# script in this repo; the operator copies this onto the box themselves.
+# D-b keeper systemd unit. Installed and enabled on the Pi chain host by
+# deployments/pi/provision-pi.sh (ZER-16); started by the timer next to it.
 # Mirrors the pattern used by devops/production/ec2/files/ops/systemd/
-# {anvil,chain-server,block-producer}.service.
+# {anvil,chain-server,block-producer}.service. The decision record — operator,
+# cadence, key, alerting — is lib/keeper/README.md.
 #
 # The keeper runs on its OWN low-value L1 key, outside chain-server — see
 # lib/keeper/run-keeper.sh's header for the full env contract, including the
 # complete testnet env block.
 #
-# Before installing, the operator must:
-#   - Pick a user. This template has no User=, so as written it runs as ROOT.
-#     Create a dedicated unprivileged user (e.g. `zeracle-keeper`) that can
-#     read the v1-l2/v1-l1 checkouts and the custodian key file, and
-#     uncomment User=/Group= below.
+# Install notes:
+#   - User. Runs as admin (owner decision 2026-09-25, ZER-16), the same user
+#     the Pi's chain-server and block-producer drop-ins use and the user that
+#     runs deploys. A dedicated keeper user would bring back the root-vs-admin
+#     ownership split that broke Pi redeploys (the wallet LMDB stores and
+#     StateDirectory= are created owned by User=). A future testnet ops host
+#     revisits this: see README.md.
 #   - Put yarn AND npx on the unit's PATH. systemd does not use a login
 #     shell's PATH, so both `yarn` and `npx` (and the node they run) must be
 #     reachable from the Environment=PATH= line below. run-keeper.sh's sweep
@@ -20,9 +23,11 @@
 #     but it must ALSO resolve on this PATH, same as yarn. Adjust the line
 #     below to where node/yarn/npx are installed (an nvm install is NOT on it
 #     by default). A PATH set in the EnvironmentFile overrides this line.
-#   - Fill in /etc/zeracle/keeper.env (mode 0600, owned by that user). It must
-#     set at least KEEPER_L1_PRIVATE_KEY, V1_L2_DIR and ZRCL_ADDRESS; on
-#     testnet also ETH_CHAIN_ID=11155111, L1_RPC_URL, AZTEC_RPC_HOST and
+#   - /etc/zeracle/keeper.env. On the Pi, deploy-pi.sh generates it from the
+#     manifest on every deploy (pi/gen-keeper-env.sh). Anywhere else, write it
+#     by hand (mode 0600, owned by User=). It must set at least
+#     KEEPER_L1_PRIVATE_KEY, V1_L2_DIR and ZRCL_ADDRESS; on testnet also
+#     ETH_CHAIN_ID=11155111, L1_RPC_URL, AZTEC_RPC_HOST and
 #     FEE_CUSTODIAN_ACCOUNT_FILE. V1_L2_DIR must be set there: WorkingDirectory
 #     does not supply it. The fee custodian needs no on-chain deployment (it
 #     is an initializerless account).
@@ -31,16 +36,24 @@
 # $KEEPER_STATE_DIR/pending-flush (default /var/lib/zeracle-keeper), one
 # "<l2 flush tx hash>,<unix epoch seconds>" line each, and retries them on
 # every run. StateDirectory= below has systemd create /var/lib/zeracle-keeper
-# owned by User=. Message proofs are served for roughly 2 h only, so with a
-# weekly timer the in-run claim wait (KEEPER_CLAIM_WAIT_SECS, default 5400) is
-# what covers slow epoch proving. Type=oneshot has no start timeout by
-# default, so a long wait is not killed.
+# owned by User=. The in-run claim wait (KEEPER_CLAIM_WAIT_SECS) covers
+# slow epoch proving; Type=oneshot has no start timeout by default, so a long
+# wait is not killed. The "~2 h proof window" the older comments assume does
+# not hold on Aztec 5.2.0 (measured on the Pi 2026-09-25, see README.md), so a
+# claim that misses its in-run wait is retried by the next run.
 #
-# A pending line older than PENDING_FLUSH_MAX_AGE_SECS (default 7200) can
-# never be claimed again, so it is dropped with an EXPIRED log line instead of
-# being retried forever. That is NOT counted as a step failure, so the unit
+# A pending line older than PENDING_FLUSH_MAX_AGE_SECS (default 7200) is
+# treated as unclaimable and dropped with an EXPIRED log line instead of being
+# retried forever. That is NOT counted as a step failure, so the unit
 # still exits 0: alerting on unrecoverable fee loss means watching the journal
-# for EXPIRED, not just the unit's exit status.
+# for EXPIRED, not just the unit's exit status. The Pi raises that age to 30
+# days (pi/gen-keeper-env.sh) because 7200 would expire claimable hashes.
+#
+# Alerting: there is no OnFailure= yet, because no alert channel exists to
+# point it at (README.md, "Open gap"). run-keeper.sh exits non-zero only on a
+# genuine step failure (an idle run exits 0), so once a channel exists every
+# OnFailure= trigger is worth a notification. Until then, failures are only in
+# `journalctl -u zeracle-keeper` and `systemctl list-units --failed`.
 #
 # The run also takes an exclusive, non-blocking flock on
 # $KEEPER_STATE_DIR/lock, so a manual run started while the timer's run is in
@@ -55,13 +68,32 @@
 Description=Zeracle fee keeper (D-b): sweep, flush, relay, convert, cushion
 Wants=network-online.target
 After=network-online.target
+# The timer is enabled, so timers.target starts it at boot and Persistent=
+# catches up a missed run — independently of deploy-pi.sh. These keep that run
+# honest. After=: never start before the chain it drives. ExecStartPre=: with
+# the chain down the run FAILS (visible in `systemctl list-units --failed`)
+# instead of half-running. Not Requisite=: that fails the job silently (result
+# "dependency", unit stays inactive) and propagates a stop of anvil or
+# aztec-sandbox to a keeper run in flight — the mid-flush kill that loses a
+# flush hash (README.md).
+# ConditionPathExists=: no env, no run — deploy-pi.sh deletes keeper.env when
+# it starts a fresh chain and writes it again only once the deploy succeeded,
+# so a reboot mid-deploy skips the run instead of driving a half-built chain.
+# A reboot still resets the Pi's L2 (pi/README.md, "Known limitation"); runs
+# then fail against the old token until the chain is redeployed, which is the
+# signal that it needs to be.
+After=anvil.service aztec-sandbox.service
+ConditionPathExists=/etc/zeracle/keeper.env
 
 [Service]
 Type=oneshot
-# User=zeracle-keeper
-# Group=zeracle-keeper
+User=admin
+Group=admin
+# Confirmed on the Pi 2026-09-25: provision-pi.sh symlinks nvm's node, npm,
+# npx and yarn into /usr/local/bin, and flock is /usr/bin/flock.
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/zeracle/keeper.env
 StateDirectory=zeracle-keeper
 WorkingDirectory=/opt/zeracle
+ExecStartPre=/usr/bin/systemctl is-active --quiet anvil.service aztec-sandbox.service
 ExecStart=/opt/zeracle/deployments/lib/keeper/run-keeper.sh

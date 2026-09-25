@@ -4,7 +4,7 @@
 # Runs on its own low-value L1 key (KEEPER_L1_PRIVATE_KEY), OUTSIDE
 # chain-server (chain-server is not part of testnet — see
 # feedback_chain_server_not_on_testnet). Installed on a schedule via the
-# zeracle-keeper.service/.timer templates in this directory; this script
+# zeracle-keeper.service/.timer units in this directory; this script
 # itself is invoked directly and is never gated on any network flag.
 #
 # Sequence (Db-10): sweep (operator mode, everything) -> flush (parses
@@ -43,18 +43,26 @@
 # $KEEPER_STATE_DIR/pending-flush BEFORE the relay runs, and every run
 # retries each pending hash with `claim:fees --tx <hash>`, removing a hash
 # only once its claim exits 0. A failed claim keeps the hash and fails the
-# relay step. The node serves message proofs for roughly 2 h only, so the
-# in-run wait (KEEPER_CLAIM_WAIT_SECS) is what covers slow proving; the
-# cross-run retry only helps if the next run comes inside that window.
+# relay step. ZER-13 assumed the node serves message proofs for roughly 2 h
+# only, so that the in-run wait (KEEPER_CLAIM_WAIT_SECS) is what covers slow
+# proving and the cross-run retry only helps inside that window. Measured on
+# Aztec 5.2.0 that window does not exist (see MEASURED below).
 #
-# Expiry (ZER-13): because of that same ~2 h window, a hash whose epoch has
-# been pruned from the node's world state can NEVER be claimed again. Retrying
+# Expiry (ZER-13): under that assumed ~2 h window, a hash whose epoch has
+# been pruned from the node's world state could NEVER be claimed again. Retrying
 # it forever costs a full KEEPER_CLAIM_WAIT_SECS per run and reports the relay
 # step FAILED every time, which buries any genuinely new failure. So each
 # pending line carries the epoch second it was recorded
 # ("<l2 flush tx hash>,<unix epoch seconds>"), and a line older than
 # PENDING_FLUSH_MAX_AGE_SECS is dropped with an EXPIRED log line instead of
 # being retried. Expiry is NOT counted as a relay failure.
+#
+# MEASURED 2026-09-25 (ZER-16, see README.md in this directory): on Aztec
+# 5.2.0 the ~2 h window above does NOT hold. The node builds the witness from
+# the archiver's blocks plus the L1 Outbox roots, not from pruned world state,
+# and served one for a 14.7 h-old message on the Pi. The Pi therefore raises
+# PENDING_FLUSH_MAX_AGE_SECS to 30 days. The 7200 default stays until ZER-19
+# checks a public node, whose archiver may be configured differently.
 #
 # An EXPIRED hash needs MANUAL, OWNER-SIDE RECOVERY — this script cannot fix
 # it and does not pretend to. The L2->L1 message itself still sits unconsumed
@@ -105,7 +113,7 @@
 #                            deployment.json is $V1_L2_DIR/deployment.json and
 #                            the default L1 deployment files live in
 #                            $V1_L2_DIR/../v1-l1/deployments/.
-#                            Under the zeracle-keeper.service template, `npx`
+#                            Under the zeracle-keeper.service unit, `npx`
 #                            must ALSO resolve on the unit's Environment=PATH=
 #                            line, same as `yarn` -- sweep and flush now run
 #                            through `npx tsx` (v1l2_tsx below), not `yarn
@@ -117,17 +125,17 @@
 #
 # Env (optional, keeper):
 #   KEEPER_STATE_DIR       - default /var/lib/zeracle-keeper (created if
-#                            missing; the service template's StateDirectory=
+#                            missing; the service unit's StateDirectory=
 #                            creates it too). Holds `pending-flush` — one
 #                            "<l2 flush tx hash>,<unix epoch seconds>" line per
 #                            pending relay — and `lock`, the flock file that
 #                            keeps two runs from overlapping.
-#   KEEPER_CLAIM_WAIT_SECS - default 5400 (90 min, inside the ~2 h proof
-#                            window). Passed to claim-fees-l1.ts as
+#   KEEPER_CLAIM_WAIT_SECS - default 5400 (90 min, inside the assumed ~2 h
+#                            proof window; the Pi sets 1800). Passed to claim-fees-l1.ts as
 #                            CLAIM_WITNESS_TIMEOUT_SECS, per pending hash.
 #   PENDING_FLUSH_MAX_AGE_SECS
-#                          - default 7200 (the ~2 h the node serves L2->L1
-#                            message proofs for). A pending line older than
+#                          - default 7200 (the ~2 h ZER-13 assumed the node
+#                            serves L2->L1 proofs for; the Pi sets 30 days). A pending line older than
 #                            this is EXPIRED and dropped, not retried. This
 #                            tracks the NODE's world-state retention
 #                            (WS_NUM_HISTORIC_CHECKPOINTS, default 64), which
@@ -430,8 +438,8 @@ else
       AGE=0
     fi
     if [ "$AGE" -gt "$PENDING_FLUSH_MAX_AGE_SECS" ]; then
-      echo "EXPIRED: flush tx $hash is ${AGE}s old, past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window, and can never" >&2
-      echo "         be claimed: the node has pruned the state its merkle proof comes from. Dropping it;" >&2
+      echo "EXPIRED: flush tx $hash is ${AGE}s old, past PENDING_FLUSH_MAX_AGE_SECS (${PENDING_FLUSH_MAX_AGE_SECS}s), the" >&2
+      echo "         age after which this keeper treats a flush as unclaimable. Dropping it;" >&2
       echo "         recovering its value is a manual, owner-side job — see this script's header." >&2
       EXPIRED=$((EXPIRED + 1))
       continue
