@@ -45,6 +45,18 @@ _start_rpc_proxy() {
   fi
 }
 
+# The fee keeper (ZER-16) must not run mid-deploy: its sweep and flush would hit
+# a chain that is half-deployed or about to be replaced. Stop the timer and any
+# run in flight. Killing a run is safe: run-keeper.sh records a flush in
+# pending-flush BEFORE relaying it, and a replayed claim is detected as already
+# consumed. The timer is started again at the end, once keeper.env is current.
+KEEPER_STATE="/var/lib/zeracle-keeper"
+_keeper_installed() { systemctl list-unit-files zeracle-keeper.timer >/dev/null 2>&1; }
+if _keeper_installed; then
+  sudo systemctl stop zeracle-keeper.timer zeracle-keeper.service 2>/dev/null || true
+  ok "keeper paused for the deploy"
+fi
+
 step "Clearing stale embedded-wallet LMDB stores"
 for stale in "$REPO/chain-server/aztec-wallet-data" "$REPO/v1-l2/aztec-wallet-data"; do
   if [ -e "$stale" ]; then
@@ -65,6 +77,11 @@ if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
   _start_rpc_proxy
 else
   echo "First run: deploying contracts."
+  # A fresh chain makes every pending L2 flush hash meaningless; left in place,
+  # each would cost a full claim wait on every run until it aged out.
+  if [ -f "$KEEPER_STATE/pending-flush" ]; then
+    sudo rm -f "$KEEPER_STATE/pending-flush" && echo "  cleared stale keeper pending-flush"
+  fi
   sudo systemctl start anvil
   timeout 120 bash -c 'until curl -fsS -X POST -H "content-type: application/json" --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" http://127.0.0.1:8545 >/dev/null; do sleep 3; done' || fail "anvil RPC never came up"
   sudo systemctl start aztec-sandbox
@@ -111,6 +128,26 @@ if [ -f "$PUB" ] && [ -n "${PUBLIC_BASE_URL:-}" ]; then
   ok "public manifest rewritten for the Pi ($PUBLIC_BASE_URL)"
 elif [ -f "$PUB" ]; then
   echo "  ! PUBLIC_BASE_URL unset — public manifest still carries EC2 endpoints"
+fi
+
+# The keeper's env carries ZRCL_ADDRESS, which changes with every fresh chain,
+# so it is regenerated from the manifest on every deploy and resume.
+if _keeper_installed; then
+  step "Fee keeper"
+  if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
+    sudo REPO="$REPO" bash "$SCRIPT_DIR/gen-keeper-env.sh" "$DATA_MOUNT/deployment-manifest.json"
+    # e2e-pi.sh holds the keeper for its whole run and restarts it itself.
+    if [ -n "${ZERACLE_KEEPER_HOLD:-}" ]; then
+      echo "  keeper timer left stopped (ZERACLE_KEEPER_HOLD set by the caller)"
+    else
+      sudo systemctl start zeracle-keeper.timer
+      ok "keeper timer running ($(systemctl show -p NextElapseUSecRealtime --value zeracle-keeper.timer))"
+    fi
+  else
+    echo "  ! no manifest — keeper timer left stopped"
+  fi
+else
+  echo "  ! zeracle-keeper.timer not installed — run provision-pi.sh (make -C deployments provision-pi)"
 fi
 
 step "Status"; systemctl --no-pager --failed || true

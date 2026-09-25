@@ -148,6 +148,13 @@ done
 # that Tailscale Funnel points at instead of anvil itself.
 sudo sed "$SUBST" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
   | sudo tee /etc/systemd/system/rpc-proxy.service >/dev/null
+# The fee keeper (ZER-16): a oneshot service and its daily timer, installed as
+# they are — User=admin and the PATH already match this host, so no drop-in.
+# Enabled here, but deploy-pi.sh is what starts the timer, after it has written
+# /etc/zeracle/keeper.env from the manifest. Decision record: lib/keeper/README.md.
+for u in zeracle-keeper.service zeracle-keeper.timer; do
+  sudo install -m 644 "$REPO/deployments/lib/keeper/$u" "/etc/systemd/system/$u"
+done
 # The embedded wallet's LMDB store is created by whichever service touches it
 # first — chain-server runs as root, so the dir lands root-owned and a manual
 # `sandbox-block-producer.sh` run as admin dies with "mdb_env_open: 13". Create
@@ -157,5 +164,5 @@ sudo chown -R "${SUDO_USER:-$USER}":"${SUDO_USER:-$USER}" "$REPO/v1-l2/aztec-wal
 ok "aztec-wallet-data owned by ${SUDO_USER:-$USER}"
 
 sudo systemctl daemon-reload
-sudo systemctl enable anvil aztec-sandbox chain-server block-producer rpc-proxy
+sudo systemctl enable anvil aztec-sandbox chain-server block-producer rpc-proxy zeracle-keeper.timer
 ok "units installed + enabled (not started)"

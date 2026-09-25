@@ -56,6 +56,13 @@
 # PENDING_FLUSH_MAX_AGE_SECS is dropped with an EXPIRED log line instead of
 # being retried. Expiry is NOT counted as a relay failure.
 #
+# MEASURED 2026-09-25 (ZER-16, see README.md in this directory): on Aztec
+# 5.2.0 the ~2 h window above does NOT hold. The node builds the witness from
+# the archiver's blocks plus the L1 Outbox roots, not from pruned world state,
+# and served one for a 14.7 h-old message on the Pi. The Pi therefore raises
+# PENDING_FLUSH_MAX_AGE_SECS to 30 days. The 7200 default stays until ZER-19
+# checks a public node, whose archiver may be configured differently.
+#
 # An EXPIRED hash needs MANUAL, OWNER-SIDE RECOVERY — this script cannot fix
 # it and does not pretend to. The L2->L1 message itself still sits unconsumed
 # in the L1 Outbox, but the merkle proof a claim needs is derived from node

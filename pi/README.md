@@ -104,10 +104,25 @@ chain: chain-up 0 s, verify 0 s, collateral 15 s, suite 70 s, **total 85 s**.
 It runs whatever code is on the box: `make -C deployments sync-pi` first to
 test a branch (syncing contract changes does not redeploy them).
 
+## Fee keeper (ZER-16)
+
+The fee keeper (`lib/keeper/run-keeper.sh`) runs daily from `zeracle-keeper.timer` as `admin`, signing with anvil key #4. `provision-pi.sh` installs and enables the units.
+
+`deploy-pi.sh` does four things for the keeper:
+- stops the timer, and any run in flight, for the duration of the deploy;
+- on a fresh chain, clears `/var/lib/zeracle-keeper/pending-flush`;
+- regenerates `/etc/zeracle/keeper.env` from the manifest (`gen-keeper-env.sh`);
+- starts the timer again.
+
+`e2e-pi.sh` pauses the keeper during its fee round-trip.
+
+The decision record, the measurement showing there's no ~2 h proof window on Aztec 5.2.0, and the day-2 commands are in `lib/keeper/README.md`. Alerting is an open gap: no channel exists, so check `systemctl list-units --failed` and `journalctl -u zeracle-keeper`.
+
 ## Day-2 ops
 
 - **Logs:** `journalctl -u anvil`, `journalctl -u aztec-sandbox`,
-  `journalctl -u chain-server`, `journalctl -u block-producer` (add `-f` to
+  `journalctl -u chain-server`, `journalctl -u block-producer`,
+  `journalctl -u zeracle-keeper` (add `-f` to
   follow, `-b` to scope to the current boot).
 - **Restart order:** the units encode their own dependency chain via
   `Requires=`/`After=` — `aztec-sandbox` requires `docker.service` and
@@ -129,7 +144,7 @@ test a branch (syncing contract changes does not redeploy them).
   the existing manifest, and starts the remaining services — no redeploy, no
   new contract addresses.
 - **Force a fresh chain:** stop the services
-  (`sudo systemctl stop block-producer chain-server aztec-sandbox anvil`),
+  (`sudo systemctl stop zeracle-keeper.timer zeracle-keeper block-producer chain-server aztec-sandbox anvil`),
   then remove `/data/deployment-manifest.json`, `/data/public-manifest.json`,
   and `/data/anvil/state.json`, and re-run `deploy-pi.sh` — it will take the
   "first run" branch and deploy a fresh set of contracts. If `pi.env` or a
