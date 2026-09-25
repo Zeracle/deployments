@@ -18,15 +18,20 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$3', got '$2')";
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
-# systemctl stub: logs every call; `is-active` reports the service active for
-# the first $ACTIVE_POLLS calls, then inactive.
+# systemctl stub: logs every call. `show -p ActiveState` reports the service
+# "activating" for the first $ACTIVE_POLLS calls, then "inactive" — which is
+# what systemd really reports for a running Type=oneshot unit. `is-active`
+# always exits 3 for it, exactly like systemd, so a check built on is-active
+# (the first version of keeper_quiesce) sees an idle keeper and fails below.
 cat > "$TMP/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
-if [ "$1" = is-active ]; then
-  n=$(cat "$STUB_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_COUNT"
-  [ "$n" -le "$ACTIVE_POLLS" ] && exit 0 || exit 3
-fi
+case "$1" in
+  show)
+    n=$(cat "$STUB_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_COUNT"
+    if [ "$n" -le "$ACTIVE_POLLS" ]; then echo activating; else echo inactive; fi ;;
+  is-active) exit 3 ;;
+esac
 exit 0
 STUB
 printf '#!/usr/bin/env bash\n"$@"\n' > "$TMP/bin/sudo"
@@ -48,13 +53,19 @@ echo "# a run in flight finishes"
 KEEPER_WAIT_POLL_SECS=1
 st=0; run 3 3600 || st=$?
 check "returns 0 once the run ends" "$st" 0
-check "polled until inactive" "$(grep -c '^is-active' "$STUB_LOG")" 4
+check "polled until inactive" "$(grep -c '^show -p ActiveState' "$STUB_LOG")" 4
 check "never stops the service" "$(grep -c 'stop.*zeracle-keeper.service' "$STUB_LOG")" 0
 
 echo "# a run that outlasts the timeout"
 st=0; run 1000 5 || st=$?
 check "returns 1 after the timeout" "$st" 1
 check "still never stops the service" "$(grep -c 'stop.*zeracle-keeper.service' "$STUB_LOG")" 0
+
+echo "# the default wait budget grows with the pending list"
+export KEEPER_STATE_DIR="$TMP/state"; mkdir -p "$KEEPER_STATE_DIR"
+check "no pending file: one claim wait + margin" "$(keeper_wait_budget)" 3600
+printf 'a,1\nb,2\n' > "$KEEPER_STATE_DIR/pending-flush"
+check "two pending: three claim waits + margin" "$(keeper_wait_budget)" 7200
 
 echo; echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

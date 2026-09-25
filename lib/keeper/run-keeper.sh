@@ -43,12 +43,13 @@
 # $KEEPER_STATE_DIR/pending-flush BEFORE the relay runs, and every run
 # retries each pending hash with `claim:fees --tx <hash>`, removing a hash
 # only once its claim exits 0. A failed claim keeps the hash and fails the
-# relay step. The node serves message proofs for roughly 2 h only, so the
-# in-run wait (KEEPER_CLAIM_WAIT_SECS) is what covers slow proving; the
-# cross-run retry only helps if the next run comes inside that window.
+# relay step. ZER-13 assumed the node serves message proofs for roughly 2 h
+# only, so that the in-run wait (KEEPER_CLAIM_WAIT_SECS) is what covers slow
+# proving and the cross-run retry only helps inside that window. Measured on
+# Aztec 5.2.0 that window does not exist (see MEASURED below).
 #
-# Expiry (ZER-13): because of that same ~2 h window, a hash whose epoch has
-# been pruned from the node's world state can NEVER be claimed again. Retrying
+# Expiry (ZER-13): under that assumed ~2 h window, a hash whose epoch has
+# been pruned from the node's world state could NEVER be claimed again. Retrying
 # it forever costs a full KEEPER_CLAIM_WAIT_SECS per run and reports the relay
 # step FAILED every time, which buries any genuinely new failure. So each
 # pending line carries the epoch second it was recorded
@@ -129,12 +130,12 @@
 #                            "<l2 flush tx hash>,<unix epoch seconds>" line per
 #                            pending relay — and `lock`, the flock file that
 #                            keeps two runs from overlapping.
-#   KEEPER_CLAIM_WAIT_SECS - default 5400 (90 min, inside the ~2 h proof
-#                            window). Passed to claim-fees-l1.ts as
+#   KEEPER_CLAIM_WAIT_SECS - default 5400 (90 min, inside the assumed ~2 h
+#                            proof window; the Pi sets 1800). Passed to claim-fees-l1.ts as
 #                            CLAIM_WITNESS_TIMEOUT_SECS, per pending hash.
 #   PENDING_FLUSH_MAX_AGE_SECS
-#                          - default 7200 (the ~2 h the node serves L2->L1
-#                            message proofs for). A pending line older than
+#                          - default 7200 (the ~2 h ZER-13 assumed the node
+#                            serves L2->L1 proofs for; the Pi sets 30 days). A pending line older than
 #                            this is EXPIRED and dropped, not retried. This
 #                            tracks the NODE's world-state retention
 #                            (WS_NUM_HISTORIC_CHECKPOINTS, default 64), which

@@ -128,8 +128,9 @@ main(){
     # Not restarted against a chain whose deploy failed: cleared until it succeeds.
     KEEPER_WAS_ACTIVE=""
     ZERACLE_KEEPER_HOLD=1 bash "$SCRIPT_DIR/deploy-pi.sh"
-    # deploy-pi.sh would have started the timer; keeper_resume does it instead.
-    KEEPER_WAS_ACTIVE=1
+    # deploy-pi.sh would have started the timer (if enabled); keeper_resume
+    # does it instead, under the same enabled check.
+    systemctl is-enabled --quiet zeracle-keeper.timer && KEEPER_WAS_ACTIVE=1
   elif [ -n "$app_down" ]; then
     echo "  inactive:$app_down -> starting them (chain untouched)"
     # shellcheck disable=SC2086  # word-splitting the unit list is intended

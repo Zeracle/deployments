@@ -70,8 +70,12 @@ Wants=network-online.target
 After=network-online.target
 # The timer is enabled, so timers.target starts it at boot and Persistent=
 # catches up a missed run — independently of deploy-pi.sh. These keep that run
-# honest. After=+Requisite=: never run before, or without, the chain it drives
-# (a run with the chain down fails visibly instead of half-running).
+# honest. After=: never start before the chain it drives. ExecStartPre=: with
+# the chain down the run FAILS (visible in `systemctl list-units --failed`)
+# instead of half-running. Not Requisite=: that fails the job silently (result
+# "dependency", unit stays inactive) and propagates a stop of anvil or
+# aztec-sandbox to a keeper run in flight — the mid-flush kill that loses a
+# flush hash (README.md).
 # ConditionPathExists=: no env, no run — deploy-pi.sh deletes keeper.env when
 # it starts a fresh chain and writes it again only once the deploy succeeded,
 # so a reboot mid-deploy skips the run instead of driving a half-built chain.
@@ -79,7 +83,6 @@ After=network-online.target
 # then fail against the old token until the chain is redeployed, which is the
 # signal that it needs to be.
 After=anvil.service aztec-sandbox.service
-Requisite=anvil.service aztec-sandbox.service
 ConditionPathExists=/etc/zeracle/keeper.env
 
 [Service]
@@ -92,4 +95,5 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/zeracle/keeper.env
 StateDirectory=zeracle-keeper
 WorkingDirectory=/opt/zeracle
+ExecStartPre=/usr/bin/systemctl is-active --quiet anvil.service aztec-sandbox.service
 ExecStart=/opt/zeracle/deployments/lib/keeper/run-keeper.sh
