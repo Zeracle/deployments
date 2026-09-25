@@ -52,6 +52,35 @@ if ! [[ "$ZRCL" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
   exit 1
 fi
 
+# Every address the keeper would otherwise read from the repo's deployment
+# files is pinned from the manifest too. Those files are NOT a safe source on
+# the Pi: `make sync-pi` ships the laptop's v1-l1/deployments/{local,bridge}.json
+# over the Pi's, and the laptop copies describe whatever chain the laptop last
+# saw. Measured 2026-09-25: after a sync, the first keeper run converted and
+# cushioned against a LiquidityPool address with no code on the Pi's anvil.
+# The manifest is written by the deploy itself and nothing syncs over it.
+#   <ENV VAR>|<manifest jq path>|<l1 or l2>
+ADDRESS_OVERRIDES=(
+  "FEE_DISTRIBUTION_ADDRESS|.l2.contracts.feeDistribution|l2"
+  "L1_TOKEN_PORTAL|.l1.contracts.tokenPortal|l1"
+  "L1_LIQUIDITY_POOL|.l1.contracts.liquidityPoolProxy|l1"
+  "L1_MOCK_DEX_AGGREGATOR|.l1.contracts.mockDexAggregator|l1"
+  "L1_TREASURY|.l1.contracts.treasury|l1"
+  "L1_COLLATERAL_RESERVE|.l1.contracts.collateralReserve|l1"
+  "L1_NETWORK_FUND|.l1.contracts.networkFund|l1"
+)
+OVERRIDE_LINES=""
+for entry in "${ADDRESS_OVERRIDES[@]}"; do
+  IFS='|' read -r var path kind <<<"$entry"
+  val=$(jq -r "$path // empty" "$MANIFEST")
+  if [ "$kind" = l2 ]; then re='^0x[0-9a-fA-F]{64}$'; else re='^0x[0-9a-fA-F]{40}$'; fi
+  if ! [[ "$val" =~ $re ]]; then
+    echo "FATAL: $path in $MANIFEST is not an $kind address: '${val}' (needed for $var)" >&2
+    exit 1
+  fi
+  OVERRIDE_LINES+="$var=$val"$'\n'
+done
+
 REPO=${REPO:-/opt/zeracle}
 mkdir -p "$(dirname "$OUT")"
 # Written to a temp file and moved, so a failure never leaves a half-written env
@@ -69,6 +98,8 @@ ZRCL_ADDRESS=$ZRCL
 KEEPER_STATE_DIR=/var/lib/zeracle-keeper
 KEEPER_CLAIM_WAIT_SECS=$KEEPER_CLAIM_WAIT_SECS
 PENDING_FLUSH_MAX_AGE_SECS=$PENDING_FLUSH_MAX_AGE_SECS
+# Addresses pinned from the manifest (ADDRESS_OVERRIDES in gen-keeper-env.sh).
+${OVERRIDE_LINES%$'\n'}
 EOF
 chmod 600 "$tmp"
 if [ "$(id -u)" -eq 0 ]; then chown "$OWNER:$OWNER" "$tmp"; fi
