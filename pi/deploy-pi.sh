@@ -46,14 +46,21 @@ _start_rpc_proxy() {
 }
 
 # The fee keeper (ZER-16) must not run mid-deploy: its sweep and flush would hit
-# a chain that is half-deployed or about to be replaced. Stop the timer and any
-# run in flight. Killing a run is safe: run-keeper.sh records a flush in
-# pending-flush BEFORE relaying it, and a replayed claim is detected as already
-# consumed. The timer is started again at the end, once keeper.env is current.
+# a chain that is half-deployed or about to be replaced. The timer is started
+# again at the end, once keeper.env is current.
+# shellcheck source=keeper-ctl.sh
+. "$SCRIPT_DIR/keeper-ctl.sh"
 KEEPER_STATE="/var/lib/zeracle-keeper"
-_keeper_installed() { systemctl list-unit-files zeracle-keeper.timer >/dev/null 2>&1; }
-if _keeper_installed; then
-  sudo systemctl stop zeracle-keeper.timer zeracle-keeper.service 2>/dev/null || true
+if keeper_installed; then
+  if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
+    # Resume: the chain lives on, so a run in flight is waited for, never
+    # killed (a kill mid-flush loses the flush hash — see keeper-ctl.sh).
+    keeper_quiesce || fail "keeper still running; retry the deploy once it finishes"
+  else
+    # First run: the chain is being replaced, so nothing a run is doing is
+    # worth keeping; stop it outright.
+    sudo systemctl stop zeracle-keeper.timer zeracle-keeper.service 2>/dev/null || true
+  fi
   ok "keeper paused for the deploy"
 fi
 
@@ -78,10 +85,12 @@ if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
 else
   echo "First run: deploying contracts."
   # A fresh chain makes every pending L2 flush hash meaningless; left in place,
-  # each would cost a full claim wait on every run until it aged out.
-  if [ -f "$KEEPER_STATE/pending-flush" ]; then
-    sudo rm -f "$KEEPER_STATE/pending-flush" && echo "  cleared stale keeper pending-flush"
-  fi
+  # each would cost a full claim wait on every run until it aged out. The env
+  # goes too: it names the old chain's token, and without it the unit's
+  # ConditionPathExists= skips any run (a reboot, say) until this deploy has
+  # succeeded and written a new one below.
+  sudo rm -f "$KEEPER_STATE/pending-flush" /etc/zeracle/keeper.env
+  echo "  cleared keeper pending-flush and keeper.env (fresh chain)"
   sudo systemctl start anvil
   timeout 120 bash -c 'until curl -fsS -X POST -H "content-type: application/json" --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" http://127.0.0.1:8545 >/dev/null; do sleep 3; done' || fail "anvil RPC never came up"
   sudo systemctl start aztec-sandbox
@@ -132,13 +141,17 @@ fi
 
 # The keeper's env carries ZRCL_ADDRESS, which changes with every fresh chain,
 # so it is regenerated from the manifest on every deploy and resume.
-if _keeper_installed; then
+if keeper_installed; then
   step "Fee keeper"
   if [ -f "$DATA_MOUNT/deployment-manifest.json" ]; then
     sudo REPO="$REPO" bash "$SCRIPT_DIR/gen-keeper-env.sh" "$DATA_MOUNT/deployment-manifest.json"
-    # e2e-pi.sh holds the keeper for its whole run and restarts it itself.
     if [ -n "${ZERACLE_KEEPER_HOLD:-}" ]; then
+      # Set only by e2e-pi.sh, which holds the keeper for its whole run and
+      # restarts it itself.
       echo "  keeper timer left stopped (ZERACLE_KEEPER_HOLD set by the caller)"
+    elif ! systemctl is-enabled --quiet zeracle-keeper.timer; then
+      # Enabled is the operator's intent: a disabled timer stays off.
+      echo "  keeper timer is disabled — left stopped (sudo systemctl enable --now zeracle-keeper.timer)"
     else
       sudo systemctl start zeracle-keeper.timer
       ok "keeper timer running ($(systemctl show -p NextElapseUSecRealtime --value zeracle-keeper.timer))"

@@ -68,6 +68,19 @@
 Description=Zeracle fee keeper (D-b): sweep, flush, relay, convert, cushion
 Wants=network-online.target
 After=network-online.target
+# The timer is enabled, so timers.target starts it at boot and Persistent=
+# catches up a missed run — independently of deploy-pi.sh. These keep that run
+# honest. After=+Requisite=: never run before, or without, the chain it drives
+# (a run with the chain down fails visibly instead of half-running).
+# ConditionPathExists=: no env, no run — deploy-pi.sh deletes keeper.env when
+# it starts a fresh chain and writes it again only once the deploy succeeded,
+# so a reboot mid-deploy skips the run instead of driving a half-built chain.
+# A reboot still resets the Pi's L2 (pi/README.md, "Known limitation"); runs
+# then fail against the old token until the chain is redeployed, which is the
+# signal that it needs to be.
+After=anvil.service aztec-sandbox.service
+Requisite=anvil.service aztec-sandbox.service
+ConditionPathExists=/etc/zeracle/keeper.env
 
 [Service]
 Type=oneshot

@@ -4,7 +4,7 @@
 # Runs on its own low-value L1 key (KEEPER_L1_PRIVATE_KEY), OUTSIDE
 # chain-server (chain-server is not part of testnet — see
 # feedback_chain_server_not_on_testnet). Installed on a schedule via the
-# zeracle-keeper.service/.timer templates in this directory; this script
+# zeracle-keeper.service/.timer units in this directory; this script
 # itself is invoked directly and is never gated on any network flag.
 #
 # Sequence (Db-10): sweep (operator mode, everything) -> flush (parses
@@ -112,7 +112,7 @@
 #                            deployment.json is $V1_L2_DIR/deployment.json and
 #                            the default L1 deployment files live in
 #                            $V1_L2_DIR/../v1-l1/deployments/.
-#                            Under the zeracle-keeper.service template, `npx`
+#                            Under the zeracle-keeper.service unit, `npx`
 #                            must ALSO resolve on the unit's Environment=PATH=
 #                            line, same as `yarn` -- sweep and flush now run
 #                            through `npx tsx` (v1l2_tsx below), not `yarn
@@ -124,7 +124,7 @@
 #
 # Env (optional, keeper):
 #   KEEPER_STATE_DIR       - default /var/lib/zeracle-keeper (created if
-#                            missing; the service template's StateDirectory=
+#                            missing; the service unit's StateDirectory=
 #                            creates it too). Holds `pending-flush` — one
 #                            "<l2 flush tx hash>,<unix epoch seconds>" line per
 #                            pending relay — and `lock`, the flock file that
@@ -437,8 +437,8 @@ else
       AGE=0
     fi
     if [ "$AGE" -gt "$PENDING_FLUSH_MAX_AGE_SECS" ]; then
-      echo "EXPIRED: flush tx $hash is ${AGE}s old, past the ~${PENDING_FLUSH_MAX_AGE_SECS}s proof window, and can never" >&2
-      echo "         be claimed: the node has pruned the state its merkle proof comes from. Dropping it;" >&2
+      echo "EXPIRED: flush tx $hash is ${AGE}s old, past PENDING_FLUSH_MAX_AGE_SECS (${PENDING_FLUSH_MAX_AGE_SECS}s), the" >&2
+      echo "         age after which this keeper treats a flush as unclaimable. Dropping it;" >&2
       echo "         recovering its value is a manual, owner-side job — see this script's header." >&2
       EXPIRED=$((EXPIRED + 1))
       continue

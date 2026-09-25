@@ -87,18 +87,21 @@ elapsed(){ echo "$(( $(date +%s) - $1 ))s"; }
 
 # The fee keeper (ZER-16) sweeps and flushes the same fees this suite does, so a
 # timer run landing mid-suite would take them from under it. Stop the timer and
-# any run in flight for the duration (safe: see deploy-pi.sh), and restart the
-# timer on exit — failures included — only if it was running before.
+# wait for any run in flight to finish (never kill it: keeper-ctl.sh), then
+# restart the timer on exit — failures included — only if it was running
+# before, or a deploy this run made succeeded.
+# shellcheck source=keeper-ctl.sh
+. "$SCRIPT_DIR/keeper-ctl.sh"
 KEEPER_WAS_ACTIVE=""
 keeper_pause(){
-  systemctl list-unit-files zeracle-keeper.timer >/dev/null 2>&1 || return 0
+  keeper_installed || return 0
   systemctl is-active --quiet zeracle-keeper.timer && KEEPER_WAS_ACTIVE=1
-  sudo systemctl stop zeracle-keeper.timer zeracle-keeper.service 2>/dev/null || true
+  keeper_quiesce || fail "a keeper run is still in flight; rerun once it finishes"
   ok "keeper paused for the suite"
 }
 keeper_resume(){
   [ -n "$KEEPER_WAS_ACTIVE" ] || return 0
-  systemctl list-unit-files zeracle-keeper.timer >/dev/null 2>&1 || return 0
+  keeper_installed || return 0
   sudo systemctl start zeracle-keeper.timer || echo "  ! could not restart zeracle-keeper.timer"
 }
 
@@ -122,6 +125,8 @@ main(){
   for s in chain-server block-producer; do systemctl is-active --quiet "$s" || app_down="$app_down $s"; done
   if [ ! -f "$MANIFEST" ] || [ -n "$core_down" ]; then
     echo "  manifest $([ -f "$MANIFEST" ] && echo present || echo absent)${core_down:+; inactive:$core_down} -> deploy-pi.sh"
+    # Not restarted against a chain whose deploy failed: cleared until it succeeds.
+    KEEPER_WAS_ACTIVE=""
     ZERACLE_KEEPER_HOLD=1 bash "$SCRIPT_DIR/deploy-pi.sh"
     # deploy-pi.sh would have started the timer; keeper_resume does it instead.
     KEEPER_WAS_ACTIVE=1

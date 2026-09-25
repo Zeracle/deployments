@@ -28,7 +28,7 @@ envval() { sed -n "s/^$1=//p" "$TMP/keeper.env"; }
 
 echo "# a good manifest"
 manifest "{\"zeracleToken\":\"$ZRCL\"}"
-out=$(REPO=/opt/zeracle bash "$SCRIPT" "$TMP/m.json" "$TMP/keeper.env" 2>&1); st=$?
+st=0; out=$(REPO=/opt/zeracle bash "$SCRIPT" "$TMP/m.json" "$TMP/keeper.env" 2>&1) || st=$?
 check "exits 0" "$st" 0
 check "ZRCL_ADDRESS from the manifest" "$(envval ZRCL_ADDRESS)" "$ZRCL"
 check "keeper key is anvil #4" "$(envval KEEPER_L1_PRIVATE_KEY)" "0x$KEY"
@@ -51,6 +51,17 @@ for case_ in '{}' '{"zeracleToken":null}' '{"zeracleToken":"0x1234"}' \
 done
 st=0; bash "$SCRIPT" "$TMP/absent.json" "$TMP/keeper.env" >/dev/null 2>&1 || st=$?
 check "rejects a missing manifest" "$st" 1
+if cmp -s "$TMP/keeper.env" "$TMP/good.env"; then ok "keeps the last good file (missing manifest)"; else bad "overwrote the env file (missing manifest)"; fi
+
+echo "# a failure after the temp file exists leaves no key behind"
+# A stub `mv` on PATH fails the final move, after the temp file holding the
+# key has been written.
+manifest "{\"zeracleToken\":\"$ZRCL\"}"
+mkdir -p "$TMP/bin" "$TMP/out"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/mv"; chmod +x "$TMP/bin/mv"
+st=0; PATH="$TMP/bin:$PATH" bash "$SCRIPT" "$TMP/m.json" "$TMP/out/keeper.env" >/dev/null 2>&1 || st=$?
+check "fails when the env cannot be moved into place" "$st" 1
+check "no temp file (key) left behind on failure" "$(find "$TMP/out" -name 'keeper.env.*' | wc -l)" "0"
 
 echo; echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

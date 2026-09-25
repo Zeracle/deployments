@@ -150,8 +150,10 @@ sudo sed "$SUBST" "$SCRIPT_DIR/systemd/rpc-proxy.service" \
   | sudo tee /etc/systemd/system/rpc-proxy.service >/dev/null
 # The fee keeper (ZER-16): a oneshot service and its daily timer, installed as
 # they are — User=admin and the PATH already match this host, so no drop-in.
-# Enabled here, but deploy-pi.sh is what starts the timer, after it has written
-# /etc/zeracle/keeper.env from the manifest. Decision record: lib/keeper/README.md.
+# Enabled here, so it starts at every boot; deploy-pi.sh pauses it for deploys
+# and starts it once it has written /etc/zeracle/keeper.env from the manifest.
+# Until that file exists the service's ConditionPathExists= skips every run.
+# Decision record: lib/keeper/README.md.
 for u in zeracle-keeper.service zeracle-keeper.timer; do
   sudo install -m 644 "$REPO/deployments/lib/keeper/$u" "/etc/systemd/system/$u"
 done
