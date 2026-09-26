@@ -21,7 +21,15 @@
 # Usage:
 #   ./deploy-testnet.sh                  # full pipeline (asks to confirm)
 #   ./deploy-testnet.sh --preflight-only # run checks only; exit 0/1, no deploy
-#   ./deploy-testnet.sh --force-version  # skip the node/SDK version match check
+#   ./deploy-testnet.sh --force-version  # node/SDK version mismatch -> warning
+#                                        # (relaxes ONLY that gate; ZER-71)
+#   ./deploy-testnet.sh --allow-unverified-fpc
+#                                        # canonical SponsoredFPC preflight
+#                                        # failure -> warning, and carried into
+#                                        # Stage 2 (ZER-28). Separate on purpose.
+#
+# The HandshakeRegistry preflight (ZER-29) has no override. See README.md,
+# "Deploying across a node/SDK version skew", for the runbook.
 #
 # Config: copy deployments/testnet/.env.example to deployments/testnet/.env
 # and fill in real values. NEVER commit or ship that file — it holds a real
@@ -53,11 +61,13 @@ fail() { echo -e "${RED}  ✗ ${1}${NC}"; exit 1; }
 
 PREFLIGHT_ONLY=false
 FORCE_VERSION=false
+ALLOW_UNVERIFIED_FPC=false
 for arg in "$@"; do
   case "$arg" in
     --preflight-only) PREFLIGHT_ONLY=true ;;
     --force-version) FORCE_VERSION=true ;;
-    *) fail "Unknown argument: $arg (supported: --preflight-only, --force-version)" ;;
+    --allow-unverified-fpc) ALLOW_UNVERIFIED_FPC=true ;;
+    *) fail "Unknown argument: $arg (supported: --preflight-only, --force-version, --allow-unverified-fpc)" ;;
   esac
 done
 
@@ -72,6 +82,13 @@ set -a
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/.env"
 set +a
+
+# ZER-71: Stage 2 (v1-l2/scripts/deploy.ts) skips its own canonical-FPC abort
+# when ZERACLE_ALLOW_UNVERIFIED_FPC=1. The ONLY way to grant that here is the
+# --allow-unverified-fpc flag. A value left in .env (sourced with `set -a`
+# above) or in the calling shell would otherwise reach `yarn deploy:clean`
+# silently, with no warning and no line in the preflight summary.
+unset ZERACLE_ALLOW_UNVERIFIED_FPC
 
 : "${MIN_DEPLOYER_BALANCE_ETH:=0.5}"
 
@@ -340,11 +357,15 @@ LOCAL_SDK_VERSION=$(jq -r '.version' "$L2_DIR/node_modules/@aztec/aztec.js/packa
 if [ "$NODE_VERSION" != "$LOCAL_SDK_VERSION" ]; then
   if [ "$FORCE_VERSION" = true ]; then
     warn "Node version ($NODE_VERSION) != local SDK version ($LOCAL_SDK_VERSION) — continuing anyway due to --force-version."
+    warn "This relaxes ONLY the version comparison. The SponsoredFPC and HandshakeRegistry preflights below still have to pass."
+    warn "Accepted residual risk and the signals that it went wrong: testnet/README.md, \"Deploying across a node/SDK version skew\"."
+    VERSION_GATE_SUMMARY="FORCED (node $NODE_VERSION, SDK $LOCAL_SDK_VERSION; --force-version)"
   else
     fail "Aztec node version ($NODE_VERSION) does not match the local SDK version ($LOCAL_SDK_VERSION) in $L2_DIR/node_modules/@aztec/aztec.js. Contract/RPC incompatibilities are likely — upgrade v1-l2's @aztec/aztec.js to match, or pass --force-version to proceed anyway at your own risk."
   fi
 else
   ok "Node version matches local SDK version ($NODE_VERSION)"
+  VERSION_GATE_SUMMARY="matched ($NODE_VERSION)"
 fi
 
 ok "L1_INBOX_ADDRESS:            $L1_INBOX_ADDRESS"
@@ -374,22 +395,34 @@ if ! CANONICAL_FPC_JSON=$(cd "$L2_DIR" && AZTEC_RPC_HOST="$AZTEC_NODE_URL" npx -
   # precisely the case where the script never ran. Test for empty explicitly.
   CANONICAL_FPC_MSG=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.message // empty' 2>/dev/null || true)
   [ -n "$CANONICAL_FPC_MSG" ] || CANONICAL_FPC_MSG="Could not run the canonical SponsoredFPC preflight (cd $L2_DIR && npx --yes tsx scripts/check-canonical-fpc.ts) — it produced no output. Check that v1-l2's dependencies are installed and that AZTEC_NODE_URL ($AZTEC_NODE_URL) is reachable."
-  # --force-version means "I know the node and SDK disagree, proceed anyway".
-  # A version disagreement is the most likely reason this check fails, so
-  # hard-aborting here would silently strip that override of its meaning.
-  if [ "$FORCE_VERSION" = true ]; then
-    warn "Canonical SponsoredFPC preflight FAILED — continuing anyway due to --force-version."
+  # ZER-71: --force-version used to downgrade this check too, on the theory
+  # that a version skew is the most likely reason it fails. That made one flag
+  # silence two different questions. The owner's 2026-09-26 route runs a
+  # 5.2.0 SDK against a 5.0.0 node on purpose, and this check PASSES there,
+  # which is the evidence that route rests on. If it stops passing, the
+  # skew has moved the derived FPC address, the case this check exists
+  # for, and proceeding records an address with no contract behind it and a
+  # deploy that is dead for every user. So the FPC has its own explicit
+  # override, for the rare case where the operator knows why it fails and
+  # still wants the deploy (e.g. Aztec's instance is briefly unfunded).
+  if [ "$ALLOW_UNVERIFIED_FPC" = true ]; then
+    warn "Canonical SponsoredFPC preflight FAILED — continuing anyway due to --allow-unverified-fpc."
     warn "$CANONICAL_FPC_MSG"
     warn "If this is wrong, Stage 2 records an FPC address with no contract behind it and every user tx fails at boot."
     # Carry the override into Stage 2, whose own preflight would otherwise
     # abort the deploy and quietly revoke what was just granted here.
     export ZERACLE_ALLOW_UNVERIFIED_FPC=1
+    FPC_SUMMARY="UNVERIFIED (--allow-unverified-fpc; Stage 2 gets ZERACLE_ALLOW_UNVERIFIED_FPC=1)"
+  elif [ "$FORCE_VERSION" = true ]; then
+    fail "$CANONICAL_FPC_MSG
+    --force-version relaxes only the node/SDK version gate; it does not relax this check (ZER-71). Under a version skew, this failing usually means the derived FPC address moved, so the deploy would be dead on arrival. Check by hand with: cd v1-l2 && AZTEC_RPC_HOST=$AZTEC_NODE_URL yarn check:canonical-fpc. Only if you know why it fails and still want the deploy, add --allow-unverified-fpc."
   else
     fail "$CANONICAL_FPC_MSG"
   fi
 else
   CANONICAL_FPC_ADDRESS=$(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.address')
   ok "Canonical SponsoredFPC: $CANONICAL_FPC_ADDRESS (fee-juice balance $(printf '%s' "$CANONICAL_FPC_JSON" | jq -r '.balance'))"
+  FPC_SUMMARY="verified ($CANONICAL_FPC_ADDRESS)"
 fi
 
 # ZER-29 (T11): cross-account private note discovery needs the standard
@@ -501,6 +534,8 @@ cat <<SUMMARY
   Basket resume mode:           $([ "$BASKET_RESUME_MODE" = true ] && echo "yes (reusing BASKET_MANAGER $BASKET_MANAGER)" || echo "no (fresh BasketManager deploy)")
   Aztec node version:           $NODE_VERSION
   Local SDK version:            $LOCAL_SDK_VERSION
+  Version gate:                 $VERSION_GATE_SUMMARY
+  Canonical SponsoredFPC:       $FPC_SUMMARY
   L1 Inbox address:             $L1_INBOX_ADDRESS
   L1 Rollup address:            $L1_ROLLUP_ADDRESS
   L1 Registry address:          $L1_REGISTRY_ADDRESS
