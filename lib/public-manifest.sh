@@ -209,6 +209,11 @@ jq -n \
                   sponsoredFpc: $D.contracts.sponsoredFpc, compliance: ($D.contracts.compliance | nn)},
       complianceEnabled: (if $D.complianceEnabled == false then false else true end),
       feeDistributionTestHelpers: ($D.feeDistributionTestHelpers // false),
+      # ZER-178 (ZER-32): the FeeDistribution flush minimum, as deploy.ts read it back
+      # from the contract. null = a deployment.json from before ZER-32 (unknown), so
+      # no `//` default here: that would turn an explicit false into null too.
+      feeDistributionFlushMinimumEnforced: $D.feeDistributionFlushMinimumEnforced,
+      feeDistributionFlushMinimum: ($D.feeDistributionFlushMinimum | nn),
       deployer: $D.deployer, feeCustodian: ($D.feeCustodian | nn)
     },
     expected: $expected,

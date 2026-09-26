@@ -89,7 +89,15 @@ safety net before real funds move). After confirmation it runs, in order:
    verification (attestor + zkPassport + the bridge's exit enforcement) is not
    part of the testnet release, so no Compliance contract is deployed and the
    bridge's exit check is disabled — the stage asserts `complianceEnabled:
-   false` in `deployment.json`. Output: `v1-l2/deployment.json`. The deployer
+   false` in `deployment.json`. It also passes the FeeDistribution flush
+   minimum explicitly — `ZERACLE_ENFORCE_FLUSH_MINIMUM=1` and
+   `ZERACLE_FLUSH_MINIMUM=10000000000000000000` (10 ZRCL across the four fee
+   buckets combined; owner decision 2026-09-26, ZER-32) — and, before wiring
+   the bridge, asserts that `deployment.json` records the deployed
+   FeeDistribution reporting that minimum as enforced
+   (`feeDistributionFlushMinimumEnforced: true`,
+   `feeDistributionFlushMinimum: "10000000000000000000"`; `deploy.ts` reads
+   both back from the contract). Output: `v1-l2/deployment.json`. The deployer
    account itself comes from `deployments/testnet/deployer-account.json`
    (see "Deployer account" below) rather than the sandbox's canonical test
    account. Once the L2 contracts are up, this stage also wires the L1
@@ -379,7 +387,7 @@ underlying problem:
 - If **Stage 2** fails, `v1-l1`'s outputs from Stage 1 are untouched;
   re-running the full script re-does Stage 1 too (see above) unless you
   invoke `stage_l2_deploy`'s underlying command directly:
-  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json FEE_CUSTODIAN_ACCOUNT_FILE=../deployments/testnet/fee-custodian-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... L1_TOKEN_PORTAL=... L1_TREASURY=... L1_COLLATERAL_RESERVE=... L1_NETWORK_FUND=... DEPLOY_TX_TIMEOUT_SECS=600 ETH_CHAIN_ID=11155111 ZERACLE_COMPLIANCE=off yarn deploy:clean`
+  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json FEE_CUSTODIAN_ACCOUNT_FILE=../deployments/testnet/fee-custodian-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... L1_TOKEN_PORTAL=... L1_TREASURY=... L1_COLLATERAL_RESERVE=... L1_NETWORK_FUND=... DEPLOY_TX_TIMEOUT_SECS=600 ETH_CHAIN_ID=11155111 ZERACLE_COMPLIANCE=off ZERACLE_ENFORCE_FLUSH_MINIMUM=1 ZERACLE_FLUSH_MINIMUM=10000000000000000000 yarn deploy:clean`
   (the same variables `stage_l2_deploy` passes; take the L1 addresses from
   Stage 1's `v1-l1/deployments/*-testnet.json`). Run it from a shell where
   `ZERACLE_ALLOW_UNVERIFIED_FPC` is unset: outside the script nothing clears

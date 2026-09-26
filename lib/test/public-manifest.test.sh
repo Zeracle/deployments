@@ -23,6 +23,9 @@ check '.l1.aztec.rollup == "0x000000000000000000000000000000000000e001" and .l1.
 check '.l2.complianceEnabled == true and .l2.contracts.compliance != null'
 check '.l1.tokens | keys == ["LUSD","USDC","USDT","WETH"]'
 check '[paths | map(tostring) | last] | index("privateKey") == null'
+# ZER-178 (ZER-32): the FeeDistribution flush minimum, carried from deployment.json.
+check '.l2.feeDistributionFlushMinimumEnforced == true'
+check '.l2.feeDistributionFlushMinimum == "10000000000000000000"'
 
 # I1: the output file must be world-readable (0644) — mktemp's default 0600
 # would otherwise survive the mv and break the EC2 scp pull.
@@ -84,6 +87,29 @@ fi
 grep -q 'missing' "$OUT/err-missing-file" || { echo "FAIL: wrong message for missing input file"; cat "$OUT/err-missing-file"; exit 1; }
 [ -f "$REFUSED" ] && { echo "FAIL: a refused run (missing input file) left an output file"; exit 1; }
 rm -rf "$MISSING_FX"
+
+# ZER-178: a deployment.json written by a v1-l2 that predates ZER-32 has neither
+# flush-minimum field. The manifest must still be written, with both as null
+# (unknown), never as a fabricated false / "0".
+PRE_FX=$(mktemp -d)
+cp -r "$FX/v1-l1" "$PRE_FX/v1-l1"
+mkdir -p "$PRE_FX/v1-l2"
+jq 'del(.feeDistributionFlushMinimumEnforced, .feeDistributionFlushMinimum)' \
+  "$FX/v1-l2/deployment.json" > "$PRE_FX/v1-l2/deployment.json"
+PRE_OUT="$OUT/pre-zer32.json"
+run PM_OUT="$PRE_OUT" PM_L1_DIR="$PRE_FX/v1-l1" PM_L2_DIR="$PRE_FX/v1-l2" >/dev/null \
+  || { echo "FAIL: a pre-ZER-32 deployment.json was refused"; exit 1; }
+jq -e '.l2 | has("feeDistributionFlushMinimumEnforced") and has("feeDistributionFlushMinimum")
+       and .feeDistributionFlushMinimumEnforced == null and .feeDistributionFlushMinimum == null' \
+  "$PRE_OUT" >/dev/null || { echo "FAIL: pre-ZER-32 flush-minimum fields are not null"; jq '.l2' "$PRE_OUT"; exit 1; }
+# An explicit false is carried as false, not collapsed to null by a `//` default.
+jq '.feeDistributionFlushMinimumEnforced = false | .feeDistributionFlushMinimum = "1000"' \
+  "$FX/v1-l2/deployment.json" > "$PRE_FX/v1-l2/deployment.json"
+run PM_OUT="$PRE_OUT" PM_L1_DIR="$PRE_FX/v1-l1" PM_L2_DIR="$PRE_FX/v1-l2" >/dev/null \
+  || { echo "FAIL: an unenforced deployment.json was refused"; exit 1; }
+jq -e '.l2.feeDistributionFlushMinimumEnforced == false and .l2.feeDistributionFlushMinimum == "1000"' \
+  "$PRE_OUT" >/dev/null || { echo "FAIL: an explicit false/1000 was not carried verbatim"; jq '.l2' "$PRE_OUT"; exit 1; }
+rm -rf "$PRE_FX"
 
 # M1: a non-hex PM_SOURCES_JSON source is refused.
 if run PM_OUT="$REFUSED" PM_SOURCES_JSON='{"v1-l1":"not-hex!!","v1-l2":"0000002","deployments":"0000003"}' >/dev/null 2>"$OUT/err-bad-sha"; then

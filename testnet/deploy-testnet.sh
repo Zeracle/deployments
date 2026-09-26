@@ -92,6 +92,13 @@ unset ZERACLE_ALLOW_UNVERIFIED_FPC
 
 : "${MIN_DEPLOYER_BALANCE_ETH:=0.5}"
 
+# ZER-178 (ZER-32): FeeDistribution's flush_fees_to_l1 minimum, in ZRCL base
+# units: 10 ZRCL = 10e18, measured across the four fee buckets combined (owner
+# decision 2026-09-26). Fixed here, not read from .env: Stage 2 passes it
+# inline, which overrides any ZERACLE_FLUSH_MINIMUM the sourced .env set, and
+# assert_fee_distribution_flush_minimum refuses anything else afterwards.
+TESTNET_FLUSH_MINIMUM=10000000000000000000
+
 # ===========================================================================
 # Stage 0: Preflight
 # ===========================================================================
@@ -542,6 +549,7 @@ cat <<SUMMARY
   L1 FeeJuicePortal address:    $L1_FEE_JUICE_PORTAL_ADDRESS
   L1 fee-juice token:           $L1_FEE_JUICE_ADDRESS
   Deployer fee-asset balance:   $FEE_ASSET_SUMMARY
+  FeeDistribution flush min:    $TESTNET_FLUSH_MINIMUM base units (10 ZRCL, enforced; ZER-32)
   ETHERSCAN_API_KEY set:        $([ -n "${ETHERSCAN_API_KEY:-}" ] && echo "yes (--verify will run on L1 targets)" || echo "no (contracts deploy unverified)")
 
 SUMMARY
@@ -841,6 +849,48 @@ assert_bridge_portal_matches() {
   ok "L2 bridge portal matches Stage 1 TokenPortal ($expected)"
 }
 
+# ---------------------------------------------------------------------------
+# ZER-178 (ZER-32): prove the deployed FeeDistribution enforces the owner's
+# flush minimum.
+#
+# FeeDistribution's `minimum_batch_enforced` is a PublicImmutable its
+# constructor writes once, so a testnet FeeDistribution deployed without it
+# lets anyone force four paid L1 relays for a trivial flush, for its lifetime.
+# v1-l2/scripts/deploy.ts reads both values back from the deployed contract
+# (is_minimum_batch_enforced, get_minimum_batch_amount) and records what the
+# chain reports in deployment.json; this checks those recorded values against
+# $1 (TESTNET_FLUSH_MINIMUM) before the one-shot wire-bridge-testnet call is
+# spent on a FeeDistribution with the wrong flush policy.
+#
+# Reads deployment.json from the current directory (stage_l2_deploy has
+# already cd'd to $L2_DIR).
+# ---------------------------------------------------------------------------
+assert_fee_distribution_flush_minimum() {
+  local expected="$1"
+  local recorded
+
+  jq -e . deployment.json >/dev/null 2>&1 \
+    || fail "v1-l2/deployment.json is not valid JSON. 'yarn deploy:clean' reported success but left a file that cannot be read, so nothing downstream can be trusted."
+
+  if ! jq -e '.feeDistributionFlushMinimumEnforced != null and .feeDistributionFlushMinimum != null' deployment.json >/dev/null; then
+    fail "v1-l2/deployment.json has no feeDistributionFlushMinimumEnforced / feeDistributionFlushMinimum. The v1-l2 that ran Stage 2 predates ZER-32, so its FeeDistribution cannot enforce a flush minimum at all -- deploying it to a live network is not supported. Refusing to spend the one-shot wire-bridge-testnet call on it."
+  fi
+
+  # `== true`, not `jq -r` + string compare: the string "true" is not a boolean.
+  if ! jq -e '.feeDistributionFlushMinimumEnforced == true' deployment.json >/dev/null; then
+    fail "The deployed FeeDistribution reports the flush minimum NOT enforced (feeDistributionFlushMinimumEnforced=$(jq -c '.feeDistributionFlushMinimumEnforced' deployment.json)). The flag is immutable, so this FeeDistribution can never enforce it; check that ZERACLE_ENFORCE_FLUSH_MINIMUM=1 reached 'yarn deploy:clean'. Refusing to spend the one-shot wire-bridge-testnet call on it."
+  fi
+
+  # A string, exactly as deploy.ts writes it: a JSON number this large loses
+  # precision in some jq versions, so only the string form is trusted.
+  recorded=$(jq -r '.feeDistributionFlushMinimum | if type == "string" then . else "not a string: \(tojson)" end' deployment.json)
+  if [ "$recorded" != "$expected" ]; then
+    fail "The deployed FeeDistribution reports a flush minimum of $recorded base units, expected $expected (10 ZRCL, owner decision 2026-09-26). Check that ZERACLE_FLUSH_MINIMUM reached 'yarn deploy:clean'."
+  fi
+
+  ok "FeeDistribution flush minimum: $recorded base units (10 ZRCL), enforced"
+}
+
 stage_l2_deploy() {
   cd "$L2_DIR"
 
@@ -863,6 +913,9 @@ stage_l2_deploy() {
   # the testnet release (owner decision 2026-09-13). ZERACLE_COMPLIANCE=off
   # deploys no Compliance contract and gives the bridge AztecAddress.ZERO (exit
   # enforcement disabled); deploy.ts refuses a live-network deploy without it.
+  # ZER-178 (ZER-32): the FeeDistribution flush minimum is passed explicitly --
+  # enforced, at TESTNET_FLUSH_MINIMUM (10 ZRCL) -- and checked right after by
+  # assert_fee_distribution_flush_minimum.
   AZTEC_RPC_HOST="$AZTEC_NODE_URL" \
     L1_RPC_URL="$TESTNET_L1_RPC_URL" \
     L1_DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
@@ -874,6 +927,8 @@ stage_l2_deploy() {
     DEPLOY_TX_TIMEOUT_SECS=600 \
     ETH_CHAIN_ID=11155111 \
     ZERACLE_COMPLIANCE=off \
+    ZERACLE_ENFORCE_FLUSH_MINIMUM=1 \
+    ZERACLE_FLUSH_MINIMUM="$TESTNET_FLUSH_MINIMUM" \
     yarn deploy:clean
   [ -f deployment.json ] || fail "v1-l2/deployment.json was not created by 'yarn deploy:clean'. Check the deploy output above for the actual failure."
   [ "$(jq -r '.complianceEnabled' deployment.json)" = "false" ] || fail "v1-l2/deployment.json reports complianceEnabled=$(jq -r '.complianceEnabled' deployment.json) — the testnet release must deploy with ZERACLE_COMPLIANCE=off (no attestor/zkPassport on testnet)."
@@ -890,6 +945,7 @@ stage_l2_deploy() {
   ok "Fee-custodian keys: $FEE_CUSTODIAN_ACCOUNT_FILE (BACK THIS UP — never commit/ship it; no on-chain deployment needed: initializerless, sweep pays via the sponsored FPC)"
 
   assert_bridge_portal_matches "$TOKEN_PORTAL"
+  assert_fee_distribution_flush_minimum "$TESTNET_FLUSH_MINIMUM"
 
   step "L2: wiring L1 TokenPortal to the freshly deployed L2 TokenBridge..."
   L2_BRIDGE_ADDRESS=$(jq -r '.contracts.tokenBridge' deployment.json)
