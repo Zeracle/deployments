@@ -29,7 +29,8 @@ ETH when run past preflight — read this whole file before running it.
 - The local `v1-l2` SDK version (`v1-l2/node_modules/@aztec/aztec.js`) must
   match the testnet node's reported version, or the deploy is likely to hit
   contract/RPC incompatibilities. The preflight checks this and fails loud
-  on a mismatch (`--force-version` overrides it, at your own risk).
+  on a mismatch (`--force-version` overrides only that comparison, at your
+  own risk; see "Deploying across a node/SDK version skew" below).
 - `v1-l2/artifacts/` and `v1-l2/target/` must already be built
   (`cd v1-l2 && yarn build`) and present on disk. Testnet deploys never
   compile Noir on the fly — same rule `deploy-sandbox.sh` uses in its
@@ -154,6 +155,180 @@ safety net before real funds move). After confirmation it runs, in order:
    value equals `PUBLIC_L1_RPC` and carries no credentials, and blanks the line
    if that ever fails.
 
+## Deploying across a node/SDK version skew (ZER-71)
+
+**Decided route (owner, 2026-09-26):** Zeracle stays on the latest v5 stable
+(`@aztec/*` 5.2.0 today, 5.3.0 once it is stable) and does not wait for v6. It
+does not pin or downgrade to the testnet node's version. The first testnet
+deploy runs against Aztec's public node, which still reports **5.0.0**, with
+`--force-version`. The decision and the measured versions are in
+`planning/versions/260913/owner-decisions.md` (item 3, 2026-09-26 entries),
+which also carries the full ZER-73 findings this section summarises.
+
+Measured read-only on 2026-09-26 (`node_getNodeInfo` on
+`https://v5.testnet.rpc.aztec-labs.com`): `nodeVersion 5.0.0`,
+`l1ChainId 11155111`, `rollupVersion 1821665230`, `realProofs true`, ENR
+protocol segment `00-11155111-d73a91bd-1821665230-2c075866-2b3b6ea4`.
+
+### What `--force-version` relaxes, gate by gate
+
+`--force-version` turns **one** Stage 0 check into a warning, and nothing else.
+
+| Gate | Without the flag | With `--force-version` |
+|---|---|---|
+| Tools, env vars, credential-free public URLs, sed-safe URLs | fatal | fatal (unchanged) |
+| L1 RPC is Sepolia (11155111), deployer ETH balance | fatal | fatal (unchanged) |
+| Governance and basket parameters, resume addresses | fatal | fatal (unchanged) |
+| Aztec node reachable and settling on Sepolia | fatal | fatal (unchanged) |
+| **Node `nodeVersion` == `v1-l2` `@aztec/aztec.js` version** | **fatal** | **warning** |
+| Canonical SponsoredFPC exists and holds fee juice (ZER-28) | fatal | **fatal**. Only `--allow-unverified-fpc` relaxes it |
+| Standard HandshakeRegistry published (ZER-29) | fatal | fatal. No flag relaxes it |
+| Deployer L1 fee-asset balance, prebuilt artifacts, web env template | fatal | fatal (unchanged) |
+| Stage 2's own FPC re-check in `v1-l2/scripts/deploy.ts` | fatal | fatal. Relaxed only when Stage 0 exports `ZERACLE_ALLOW_UNVERIFIED_FPC=1`, which only `--allow-unverified-fpc` does |
+| Stages 1, 2b, 2c, 3 | not affected by either flag | not affected by either flag |
+
+Before ZER-71, `--force-version` also downgraded the SponsoredFPC preflight
+and exported `ZERACLE_ALLOW_UNVERIFIED_FPC=1` into Stage 2. That coupling is
+gone. The FPC check passes against the 5.0.0 node, and that pass is part of
+the evidence this route rests on. If it stops passing, the skew has most likely
+moved the derived FPC address, and a deploy past it is dead on arrival. The
+script also clears any `ZERACLE_ALLOW_UNVERIFIED_FPC` inherited from `.env` or
+the shell: only the flag can grant it.
+
+The preflight summary prints what was relaxed: `Version gate: FORCED (node
+5.0.0, SDK 5.2.0; --force-version)` and `Canonical SponsoredFPC: verified
+(<address>)`.
+
+Under the flag, the version gate accepts **any** node version. It does not
+check that the node is still on 5.0.0. That is why the first pre-deploy check
+below re-measures the node by hand.
+
+### Pre-deploy checks (by hand, every run)
+
+`--force-version` makes the version comparison non-fatal, so confirm by hand
+that nothing else has moved. All four are read-only.
+
+1. **The node is still the node this decision was made against.**
+   ```sh
+   curl -s -X POST -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"node_getNodeInfo","params":[]}' \
+     https://v5.testnet.rpc.aztec-labs.com \
+     | jq '{nodeVersion: .result.nodeVersion, l1ChainId: .result.l1ChainId, rollupVersion: .result.rollupVersion, rollup: .result.l1ContractAddresses.rollupAddress}'
+   ```
+   Expect `5.0.0`, `11155111`, `1821665230`, rollup
+   `0xd73a91bdcf6891c7642f3e460036e1ef2cc23178`. To check the ENR protocol
+   segment too:
+   ```sh
+   curl -s -X POST -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"node_getNodeInfo","params":[]}' \
+     https://v5.testnet.rpc.aztec-labs.com | jq -r .result.enr \
+     | python3 -c 'import sys,base64,re; e=sys.stdin.read().strip().removeprefix("enr:"); b=base64.urlsafe_b64decode(e+"="*(-len(e)%4)); m=re.search(rb"\d{2}-\d+-[0-9a-f]{8}-\d+-[0-9a-f]{8}-[0-9a-f]{8}",b); print(m.group().decode() if m else "no aztec segment")'
+   ```
+   Expect `00-11155111-d73a91bd-1821665230-2c075866-2b3b6ea4`. The last two
+   segments are the protocol-contracts hash and the VK root; ZER-73 matched
+   them to 5.2.0's.
+   - If `nodeVersion` now equals `v1-l2`'s `@aztec/aztec.js` version, drop
+     `--force-version`.
+   - If only `nodeVersion` changed, and the rollup address, `rollupVersion`
+     and the last two ENR segments did not, it is a plain version bump.
+     Re-run checks 2 to 4. If they pass, the route still holds.
+   - If the rollup address, `rollupVersion` or the last two ENR segments
+     changed, the network or protocol changed, and addresses may have moved.
+     **Stop.** This decision no longer covers it; re-plan with the owner
+     (ZER-34).
+2. **Canonical SponsoredFPC** (ZER-28), from `v1-l2`:
+   ```sh
+   cd v1-l2 && AZTEC_RPC_HOST=https://v5.testnet.rpc.aztec-labs.com yarn check:canonical-fpc
+   ```
+   Expect exit 0 and `"ok":true`, `"exists":true`, a non-zero `balance`, at
+   `0x2ece607a8dba690c9aa4ee1d53a55286fa815543a27f9364bbaf65eb68e7315b`
+   (ZER-71 measured this passing against the 5.0.0 node).
+3. **HandshakeRegistry** (ZER-29), from `v1-l2`:
+   ```sh
+   cd v1-l2 && AZTEC_RPC_HOST=https://v5.testnet.rpc.aztec-labs.com yarn check:handshake
+   ```
+   Expect exit 0 and `"exists":true` at
+   `0x06127814dca78709650de6629637194f7381d2e05b35eb9d53a4746636c9aa9d`
+   (also measured passing by ZER-71).
+4. **The whole Stage 0**, with the flag:
+   ```sh
+   cd deployments/testnet && ./deploy-testnet.sh --preflight-only --force-version
+   ```
+   Expect `PREFLIGHT PASS`. The flag adds three warnings, all from the version
+   gate: the mismatch, "relaxes ONLY the version comparison", and a pointer to
+   this section. Any warnings you would see without the flag, such as the
+   missing `ETHERSCAN_API_KEY` or a reused fee-juice claim, still appear too.
+   Any **failure** is a real one: fix it. Do not reach for another flag.
+
+### The command
+
+```sh
+cd deployments/testnet
+./deploy-testnet.sh --force-version
+```
+
+Run the script directly: `make -C deployments deploy-testnet` passes it no
+arguments, so it cannot carry the flag. Do **not** add `--allow-unverified-fpc`
+on this route. Check 2 passes, so it is not needed, and adding it would only
+hide the one failure that means the skew has bitten.
+
+### Residual risk accepted
+
+What can break when a 5.2.0 SDK talks to the 5.0.0 node. The full table,
+with evidence, is ZER-73's "Residual risk: a 5.2.0 SDK against the 5.0.0 node"
+in the decision log.
+
+| # | Risk | Assessment | Signal that it went wrong |
+|---|---|---|---|
+| R1 | Protocol, circuit or VK mismatch rejects proofs | Ruled out by ZER-73: the ENR's protocol hash and VK root match 5.2.0 | `sendTx` rejected with proof, vk-tree or protocol-hash errors; the first L2 account deploy in Stage 2 fails |
+| R2 | RPC schema mismatch between client and node | Low: the 55 node methods are identical, and 5.0.0→5.2.0 wire changes only add upper bounds. On 2026-09-26 ZER-71 captured the live node's `node_getNodeInfo` reply (read-only) and served it from a loopback stub to the real 5.2.0 client (`createAztecNodeClient(...).getNodeInfo()`, the call Stage 0 makes), which parsed it cleanly. That covers this one method, not the other 54 | Zod parse errors on node calls in the deploy log or the browser console |
+| R3 | Spurious "message does not exist" on an L2→L1 witness (the node lacks aztec-packages #24754) | Possible, transient | A keeper flush or withdraw-finalize fails once, then succeeds on retry. Repeats are the alert |
+| R4 | `block_not_available` or "Could not find tx effect" after a reorg (#25206, #24765) | Possible, transient | Receipt-polling or deposit-claim errors that clear on retry. Persistent ones are a node problem: report upstream |
+| R5 | Fee-quote rejection (#25344) | Likely when fees move | `maxFeesPerGas … must be ≥ gasFees` despite `withFeeHeadroom`: raise the padding |
+| R6 | Missing `result` on JSON-RPC (#24840) | Certain for `undefined` results; the TS client, chain-view and `jq` handle it | A raw-RPC script treats a missing contract as a malformed reply |
+| R7 | Canonical SponsoredFPC or HandshakeRegistry missing | Verified present by ZER-71; Stage 0 still checks both, fatally | Stage 0 fails; after deploy, account deploys fail on fee payment, or a fresh recipient never discovers notes |
+| R8 | Handshake forgery protection (5.0.1) differs between clients | Client-to-client only. Every Zeracle user runs the 5.2.0 web client | Only a third-party 5.0.0 wallet would fail note discovery with Zeracle. Out of scope |
+| R9 | Real-proof latency and memory in the browser | Unknown until ZER-39 measures it on this node | ZER-39 timings; browser OOM or tab crash; account deploys far slower than the sandbox |
+| R10 | Proving lag delays exits (~40 min proven lag measured) | Certain | Exits pending 40 min or more. The keeper's proof-age budget must allow for it |
+
+Not a risk from the skew, but it comes with this route: the version gate cannot
+tell a 5.0.0 node from any other version while the flag is set. Pre-deploy
+check 1 is the only thing that notices the node moving.
+
+### If it goes wrong
+
+- **Stage 0 fails on anything other than the version gate.** Nothing has been
+  broadcast. Fix the cause and re-run `--preflight-only --force-version`.
+  - If the FPC or HandshakeRegistry check fails, re-run pre-deploy checks 1
+    to 3. A changed ENR protocol segment means stop and re-plan.
+  - A missing HandshakeRegistry on an unchanged node is published with
+    `cd v1-l2 && AZTEC_RPC_HOST=<node url> yarn deploy:handshake`.
+- **Stage 1 fails.** Stage 1 is L1-only and uses nothing from the skew except
+  the Inbox and Rollup addresses the node reported. See "Re-run semantics"
+  below.
+- **Stage 2 fails with a proof, VK or protocol-hash error (R1), or a Zod parse
+  error (R2).** This is the skew biting. Stop: do not retry, and do not add
+  flags.
+  - Keep `deployer-account.json`, any `deployer-account.json.pending-claim.json`,
+    and the full log. The pending claim holds bridged fee-asset that only that
+    file can recover.
+  - Re-measure the node (check 1), then take it back to ZER-34. The
+    alternatives on record are waiting for the node to reach 5.2.0, or pinning
+    to the node's version. The owner rejected the pin on 2026-09-26.
+- **Stage 2 fails with a transient node error (R3, R4) or a fee-quote rejection
+  (R5).** Re-run Stage 2 alone, as "Re-run semantics" describes (make sure
+  `ZERACLE_ALLOW_UNVERIFIED_FPC` is not set in your shell: that command runs
+  outside the script, which is what clears it). The reused
+  `DEPLOYER_ACCOUNT_FILE` and pending claim make it safe. For R5, raise the fee
+  padding first.
+- **After deploy, user account deploys fail on fee payment.** Re-run
+  `yarn check:canonical-fpc` against the node. Unfunded is an Aztec-side
+  issue; missing means the node moved.
+- **After deploy, a recipient never sees a transfer.** Re-run
+  `yarn check:handshake`.
+- **The node reports 5.2.0 or later.** Re-run Stage 0 without the flag. If it
+  passes, drop `--force-version` from every later run.
+
 ## Deployer account
 
 Unlike the sandbox (which uses a canonical, pre-deployed test account already
@@ -204,8 +379,11 @@ underlying problem:
 - If **Stage 2** fails, `v1-l1`'s outputs from Stage 1 are untouched;
   re-running the full script re-does Stage 1 too (see above) unless you
   invoke `stage_l2_deploy`'s underlying command directly:
-  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... DEPLOY_TX_TIMEOUT_SECS=600 ZERACLE_COMPLIANCE=off yarn deploy:clean`
-  (see "Deployer account" above — reusing the same `DEPLOYER_ACCOUNT_FILE`
+  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json FEE_CUSTODIAN_ACCOUNT_FILE=../deployments/testnet/fee-custodian-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... L1_TOKEN_PORTAL=... L1_TREASURY=... L1_COLLATERAL_RESERVE=... L1_NETWORK_FUND=... DEPLOY_TX_TIMEOUT_SECS=600 ETH_CHAIN_ID=11155111 ZERACLE_COMPLIANCE=off yarn deploy:clean`
+  (the same variables `stage_l2_deploy` passes; take the L1 addresses from
+  Stage 1's `v1-l1/deployments/*-testnet.json`). Run it from a shell where
+  `ZERACLE_ALLOW_UNVERIFIED_FPC` is unset: outside the script nothing clears
+  it, and set to `1` it skips `deploy.ts`'s own canonical-FPC abort (see "Deployer account" above — reusing the same `DEPLOYER_ACCOUNT_FILE`
   is what makes this safe to repeat). If deploy succeeds but the bridge
   wiring assertion fails afterward, retry just that step with
   `ETH_RPC_URL=... DEPLOYER_PRIVATE_KEY=... make -C v1-l1 wire-bridge-testnet`.
@@ -248,8 +426,10 @@ supported way to check everything short of broadcasting.
   check as a second guard before it bridges. If either fires, check the
   node's aztec version against the `@aztec/*` versions in
   `v1-l2/package.json` first: it means the two disagree, not that anything
-  needs funding. `--force-version` downgrades both to warnings, and the
-  deploy will then record an address that may have no contract behind it.
+  needs funding. `--force-version` does **not** relax either check (ZER-71).
+  The only override is `--allow-unverified-fpc`, which downgrades both to
+  warnings; the deploy will then record an address that may have no contract
+  behind it.
 - To check it by hand against any node:
   `cd v1-l2 && AZTEC_RPC_HOST=<node url> yarn check:canonical-fpc`
 - Stage 0 also preflights the standard **HandshakeRegistry** (ZER-29/T11).

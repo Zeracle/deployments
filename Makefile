@@ -148,8 +148,10 @@ stop-fes-chain: ## Stop only the chain view
 # guard only spoke up if someone happened to invoke it by hand — which is not
 # the moment a guard is for. They are all offline: they read and parse scripts
 # rather than executing them, and never touch Sepolia, the Aztec testnet or the
-# EC2 sandbox. One exception worth knowing: install-mock-feeds-chain-guard
-# binds local port 8597 for a stub RPC (still no outside network).
+# EC2 sandbox. Two exceptions worth knowing: install-mock-feeds-chain-guard
+# binds local port 8597 for a stub RPC, and deploy-testnet-force-version
+# (ZER-71) runs deploy-testnet.sh --preflight-only in a temp dir against a
+# stub Aztec node on an OS-assigned 127.0.0.1 port (still no outside network).
 test: ## Run the offline shell tests (lib/test + sandbox-local/test + pi/test)
 	@fail=0; \
 	for t in lib/test/*.test.sh sandbox-local/test/*.test.sh pi/test/*.test.sh; do \
