@@ -718,6 +718,17 @@ stage_l1_deploy() {
     ok "  $sym -> $want (live)"
   done
 
+  # ZER-105: the same two are withdrawal OUTPUTS, priced by WithdrawalAdapter.outputPriceFeeds.
+  step "L1: verifying exit-asset (USDC/USDT) output price feeds..."
+  for sym in USDC USDT; do
+    tok=$(jq -r --arg s "$sym" '.[$s]' deployments/tokens-testnet.json)
+    want=$(jq -r --arg s "$sym" '.feeds[$s]' deployments/tokens-testnet.json)
+    got=$(cast call "$WITHDRAWAL_ADAPTER" "outputPriceFeeds(address)(address)" "$tok" --rpc-url "$TESTNET_L1_RPC_URL")
+    [ "$(echo "$got" | tr '[:upper:]' '[:lower:]')" = "$(echo "$want" | tr '[:upper:]' '[:lower:]')" ] \
+      || fail "WithdrawalAdapter.outputPriceFeeds($sym $tok) is $got, expected $want — 'make deploy-mocks-testnet' did not run DeployMocks step 3b."
+    ok "  $sym -> $want (live)"
+  done
+
   step "L1: deploying TokenPortal bridge (Sepolia)..."
   # ZER-29: same tolerance as the two targets above and Stage 2b/2c.
   rm -f deployments/bridge-testnet.json

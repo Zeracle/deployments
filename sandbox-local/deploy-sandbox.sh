@@ -315,6 +315,20 @@ for entry in "USDC:$FEED_USDC_USD" "USDT:$FEED_USDT_USD"; do
   ok "  $sym -> $want"
 done
 
+# ZER-105: the same two are withdrawal OUTPUTS, priced by WithdrawalAdapter.outputPriceFeeds for
+# the same reason. Unwired, every route into USDC/USDT reverts UnpricedOutputAsset, and the web
+# refuses to quote them. Same feeds as the deposit side.
+W_ADAPTER=$(jq -r '.withdrawalAdapter' "$L1_DIR/deployments/local.json")
+step "Verifying WithdrawalAdapter exit-asset price feeds..."
+for entry in "USDC:$FEED_USDC_USD" "USDT:$FEED_USDT_USD"; do
+  sym="${entry%%:*}"; want="${entry##*:}"
+  tok=$(jq -r --arg s "$sym" '.[$s]' "$L1_DIR/deployments/tokens.json")
+  got=$(cast call "$W_ADAPTER" "outputPriceFeeds(address)(address)" "$tok" --rpc-url "$ETH_RPC_URL")
+  [ "$(echo "$got" | tr '[:upper:]' '[:lower:]')" = "$(echo "$want" | tr '[:upper:]' '[:lower:]')" ] \
+    || fail "WithdrawalAdapter.outputPriceFeeds($sym $tok) is $got, expected $want — exits into $sym WILL revert on chain. Confirm DeployMocks step 3b ran against a post-ZER-105 WithdrawalAdapter."
+  ok "  $sym -> $want"
+done
+
 # ===========================================================================
 # 3. Deploy L1 TokenPortal Bridge
 # ===========================================================================
