@@ -26,8 +26,8 @@
     "contracts": {
       "liquidityPoolProxy": "0x0b48aF34f4c854F5ae1A3D587da471FeA45bAD52",
       "liquidityPoolImpl": "0x05Aa229Aec102f78CE0E852A812a388F076Aa555",
-      "depositAdapter": "0x0f5D1ef48f12b6f691401bfe88c2037c690a6afe",
-      "withdrawalAdapter": "0x90118d110B07ABB82Ba8980D1c5cC96EeA810d2C",
+      "depositAdapter": "0x181522bb19Ae83E9984c469f67DAe5602F0BC3de",
+      "withdrawalAdapter": "0xa1004966f9F30870C5b5E14EAA5a8134E7C63Cec",
       "bridgeGuard": "0x73eccD6288e117cAcA738BDAD4FEC51312166C1A",
       "treasury": "0x381445710b5e73d34aF196c53A3D5cDa58EDBf7A",
       "collateralReserve": "0xe6b98F104c1BEf218F3893ADab4160Dc73Eb8367",
