@@ -164,10 +164,17 @@ printf '#!/usr/bin/env bash\necho "forge stub: must not run in preflight" >&2; e
 printf '#!/usr/bin/env bash\necho "yarn stub: must not run in preflight" >&2; exit 1\n' > "$T/bin/yarn"
 # npx impersonates the two v1-l2 check scripts. STUB_FPC / STUB_HANDSHAKE pick
 # pass or fail; the JSON mirrors what those scripts print.
+# Each call also records what ZERACLE_ALLOW_UNVERIFIED_FPC looks like in the
+# script's environment at that moment ($ENV_PROBE_DIR/<check>). The handshake
+# check runs AFTER the FPC branch and inherits exactly what `yarn deploy:clean`
+# would inherit in Stage 2, so its record is the runtime answer to "does Stage 2
+# get the FPC override?", which --preflight-only cannot otherwise show.
 cat > "$T/bin/npx" <<'SH'
 #!/usr/bin/env bash
+probe() { [ -n "${ENV_PROBE_DIR:-}" ] && printf '%s' "${ZERACLE_ALLOW_UNVERIFIED_FPC-unset}" > "$ENV_PROBE_DIR/$1"; return 0; }
 case "$*" in
   *check-canonical-fpc.ts*)
+    probe fpc
     if [ "${STUB_FPC:-pass}" = pass ]; then
       echo '{"address":"0x2ece","exists":true,"balance":"1500000","ok":true,"reason":null,"message":null}'
     else
@@ -175,6 +182,7 @@ case "$*" in
       exit 1
     fi ;;
   *check-handshake-registry.ts*)
+    probe handshake
     if [ "${STUB_HANDSHAKE:-pass}" = pass ]; then
       echo '{"address":"0x0612","exists":true,"ok":true,"message":null}'
     else
@@ -208,9 +216,10 @@ run() {
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ "${1:-}" = "--" ] && shift
   local got=0
+  rm -rf "$T/probe" && mkdir -p "$T/probe"
   # env -u: an ambient ZERACLE_ALLOW_UNVERIFIED_FPC in the caller's shell must
   # not leak into cases that do not set it.
-  env -u ZERACLE_ALLOW_UNVERIFIED_FPC PATH="$T/bin:$PATH" NO_COLOR=1 "${envs[@]}" \
+  env -u ZERACLE_ALLOW_UNVERIFIED_FPC PATH="$T/bin:$PATH" ENV_PROBE_DIR="$T/probe" "${envs[@]}" \
     bash "$T/deployments/testnet/deploy-testnet.sh" --preflight-only "$@" > "$OUT" 2>&1 || got=$?
   [ "$got" -ne 0 ] && got=1
   if [ "$got" != "$want" ]; then
@@ -223,6 +232,13 @@ run() {
 }
 expect() {  # expect <label> <fixed string>
   grep -qF -- "$2" "$OUT" || { echo "FAIL [$1]: output lacks: $2"; FAILS=$((FAILS + 1)); }
+}
+# stage2_env <label> <expected: unset|1>: what ZERACLE_ALLOW_UNVERIFIED_FPC was
+# when the handshake check (the last subprocess before Stage 2) ran.
+stage2_env() {
+  local got
+  got=$(cat "$T/probe/handshake" 2>/dev/null || echo "<handshake check never ran>")
+  [ "$got" = "$2" ] || { echo "FAIL [$1]: Stage 2 would see ZERACLE_ALLOW_UNVERIFIED_FPC=$got, expected $2"; FAILS=$((FAILS + 1)); }
 }
 reject() {  # reject <label> <fixed string>
   if grep -qF -- "$2" "$OUT"; then echo "FAIL [$1]: output unexpectedly contains: $2"; FAILS=$((FAILS + 1)); fi
@@ -243,6 +259,7 @@ if run 0 "force, checks pass" -- --force-version; then
   expect "force, checks pass" "Version gate:                 FORCED (node 5.0.0, SDK $SDK_VERSION; --force-version)"
   expect "force, checks pass" "Canonical SponsoredFPC:       verified"
   expect "force, checks pass" "PREFLIGHT PASS"
+  stage2_env "force, checks pass" unset
 fi
 
 # 3. --force-version does NOT relax a failed FPC preflight (the ZER-71 narrowing).
@@ -263,6 +280,7 @@ if run 0 "force + allow-unverified-fpc, FPC fails" STUB_FPC=fail -- --force-vers
   expect "force + allow-unverified-fpc, FPC fails" "Canonical SponsoredFPC preflight FAILED — continuing anyway due to --allow-unverified-fpc."
   expect "force + allow-unverified-fpc, FPC fails" "Canonical SponsoredFPC:       UNVERIFIED (--allow-unverified-fpc; Stage 2 gets ZERACLE_ALLOW_UNVERIFIED_FPC=1)"
   expect "force + allow-unverified-fpc, FPC fails" "PREFLIGHT PASS"
+  stage2_env "force + allow-unverified-fpc, FPC fails" 1
 fi
 
 # 6. --allow-unverified-fpc does not relax the version gate.
@@ -275,12 +293,20 @@ run 1 "all flags, handshake fails" STUB_HANDSHAKE=fail -- --force-version --allo
   && expect "all flags, handshake fails" "STUB: no HandshakeRegistry published"
 
 # 8. An ambient ZERACLE_ALLOW_UNVERIFIED_FPC=1 (shell or .env) is not an
-#    override: only the flag grants it.
-if run 1 "ambient env var, FPC fails" STUB_FPC=fail ZERACLE_ALLOW_UNVERIFIED_FPC=1 -- --force-version; then
-  reject "ambient env var, FPC fails" "PREFLIGHT PASS"
+#    override: only the flag grants it. With the FPC check PASSING, so the run
+#    reaches the handshake probe and the assertion is about the unset alone,
+#    not about which FPC branch fired.
+if run 0 "ambient env var" ZERACLE_ALLOW_UNVERIFIED_FPC=1 -- --force-version; then
+  stage2_env "ambient env var" unset
 fi
 echo "ZERACLE_ALLOW_UNVERIFIED_FPC=1" >> "$T/deployments/testnet/.env"
-run 1 "FPC override in .env, FPC fails" STUB_FPC=fail -- --force-version || true
+if run 0 "override in .env" -- --force-version; then
+  stage2_env "override in .env" unset
+fi
+#    ...and with the FPC check failing, neither source turns it into a pass.
+if run 1 "override in .env + shell, FPC fails" STUB_FPC=fail ZERACLE_ALLOW_UNVERIFIED_FPC=1 -- --force-version; then
+  reject "override in .env + shell, FPC fails" "PREFLIGHT PASS"
+fi
 sed -i '/^ZERACLE_ALLOW_UNVERIFIED_FPC=/d' "$T/deployments/testnet/.env"
 
 # 9. Unknown flags are still refused, and the message lists the new one.
@@ -288,22 +314,34 @@ if run 1 "unknown flag" -- --force-versions; then
   expect "unknown flag" "--allow-unverified-fpc"
 fi
 
-# 10. STATIC: ZERACLE_ALLOW_UNVERIFIED_FPC=1 is exported in exactly one place,
+# 10. STATIC backstop: ZERACLE_ALLOW_UNVERIFIED_FPC is exported in exactly one place,
 #     and only under --allow-unverified-fpc. Stage 2 (yarn deploy:clean)
 #     inherits the environment, so any other export would re-couple the FPC
 #     override to something else. --preflight-only exits before Stage 2, so this
 #     half cannot be shown at runtime.
-EXPORTS=$(grep -nE '^[[:space:]]*export[[:space:]]+ZERACLE_ALLOW_UNVERIFIED_FPC=1' "$SCRIPT" || true)
+EXPORTS=$(grep -nE '(^|[;&|[:space:]])export[[:space:]]+([^#]*[[:space:]])?ZERACLE_ALLOW_UNVERIFIED_FPC(=|[[:space:]]|$)' "$SCRIPT" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
 if [ "$(printf '%s' "$EXPORTS" | grep -c .)" != 1 ]; then
-  echo "FAIL [static export]: expected exactly one 'export ZERACLE_ALLOW_UNVERIFIED_FPC=1', found:"
+  echo "FAIL [static export]: expected exactly one export of ZERACLE_ALLOW_UNVERIFIED_FPC, found:"
   printf '%s\n' "${EXPORTS:-<none>}" | sed 's/^/        /'
   FAILS=$((FAILS + 1))
 else
   EXPORT_LINE=${EXPORTS%%:*}
-  GUARD=$(awk -v n="$EXPORT_LINE" 'NR < n && /^[[:space:]]*if[[:space:]]/ { last = $0 } NR == n { print last; exit }' "$SCRIPT")
+  # The branch that ENCLOSES the export: walk up, tracking if/fi nesting, to
+  # the nearest if/elif/else at the export's own depth.
+  GUARD=$(awk -v n="$EXPORT_LINE" '
+    { l[NR] = $0 }
+    END {
+      depth = 0
+      for (i = n - 1; i >= 1; i--) {
+        line = l[i]
+        if (line ~ /^[[:space:]]*fi([[:space:]]|;|$)/) { depth++; continue }
+        if (line ~ /^[[:space:]]*if[[:space:]]/) { if (depth == 0) { print line; exit } depth--; continue }
+        if (depth == 0 && line ~ /^[[:space:]]*(elif[[:space:]]|else([[:space:]]|$))/) { print line; exit }
+      }
+    }' "$SCRIPT")
   case "$GUARD" in
-    *'"$ALLOW_UNVERIFIED_FPC" = true'*) ;;
-    *) echo "FAIL [static export]: the export at line $EXPORT_LINE is guarded by '$GUARD', not by ALLOW_UNVERIFIED_FPC"
+    *'if [ "$ALLOW_UNVERIFIED_FPC" = true ]'*) ;;
+    *) echo "FAIL [static export]: the export at line $EXPORT_LINE sits in branch '$GUARD', not in 'if [ \"\$ALLOW_UNVERIFIED_FPC\" = true ]'"
        FAILS=$((FAILS + 1)) ;;
   esac
 fi

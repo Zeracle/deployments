@@ -229,11 +229,13 @@ that nothing else has moved. All four are read-only.
    them to 5.2.0's.
    - If `nodeVersion` now equals `v1-l2`'s `@aztec/aztec.js` version, drop
      `--force-version`.
-   - If the version or rollup changed and the last two ENR segments did
-     **not**, the node was upgraded within the same protocol. Re-run the
-     remaining checks; if they pass, the route still holds.
-   - If the last two ENR segments changed, the protocol changed and so do the
-     addresses. **Stop.** This decision no longer covers it; re-plan (ZER-34).
+   - If only `nodeVersion` changed, and the rollup address, `rollupVersion`
+     and the last two ENR segments did not, it is a plain version bump.
+     Re-run checks 2 to 4. If they pass, the route still holds.
+   - If the rollup address, `rollupVersion` or the last two ENR segments
+     changed, the network or protocol changed, and addresses may have moved.
+     **Stop.** This decision no longer covers it; re-plan with the owner
+     (ZER-34).
 2. **Canonical SponsoredFPC** (ZER-28), from `v1-l2`:
    ```sh
    cd v1-l2 && AZTEC_RPC_HOST=https://v5.testnet.rpc.aztec-labs.com yarn check:canonical-fpc
@@ -252,10 +254,11 @@ that nothing else has moved. All four are read-only.
    ```sh
    cd deployments/testnet && ./deploy-testnet.sh --preflight-only --force-version
    ```
-   Expect `PREFLIGHT PASS`, with exactly three extra warnings, all from the
-   version gate (the mismatch, "relaxes ONLY the version comparison", and a
-   pointer to this section). Any **other** failure is a real one: fix it. Do
-   not reach for another flag.
+   Expect `PREFLIGHT PASS`. The flag adds three warnings, all from the version
+   gate: the mismatch, "relaxes ONLY the version comparison", and a pointer to
+   this section. Any warnings you would see without the flag, such as the
+   missing `ETHERSCAN_API_KEY` or a reused fee-juice claim, still appear too.
+   Any **failure** is a real one: fix it. Do not reach for another flag.
 
 ### The command
 
@@ -278,7 +281,7 @@ in the decision log.
 | # | Risk | Assessment | Signal that it went wrong |
 |---|---|---|---|
 | R1 | Protocol, circuit or VK mismatch rejects proofs | Ruled out by ZER-73: the ENR's protocol hash and VK root match 5.2.0 | `sendTx` rejected with proof, vk-tree or protocol-hash errors; the first L2 account deploy in Stage 2 fails |
-| R2 | RPC schema mismatch between client and node | Low: the 55 node methods are identical, and 5.0.0→5.2.0 wire changes only add upper bounds. ZER-71 also replayed the live 5.0.0 `getNodeInfo` payload offline through the real 5.2.0 client, which parsed it cleanly | Zod parse errors on node calls in the deploy log or the browser console |
+| R2 | RPC schema mismatch between client and node | Low: the 55 node methods are identical, and 5.0.0→5.2.0 wire changes only add upper bounds. On 2026-09-26 ZER-71 captured the live node's `node_getNodeInfo` reply (read-only) and served it from a loopback stub to the real 5.2.0 client (`createAztecNodeClient(...).getNodeInfo()`, the call Stage 0 makes), which parsed it cleanly. That covers this one method, not the other 54 | Zod parse errors on node calls in the deploy log or the browser console |
 | R3 | Spurious "message does not exist" on an L2→L1 witness (the node lacks aztec-packages #24754) | Possible, transient | A keeper flush or withdraw-finalize fails once, then succeeds on retry. Repeats are the alert |
 | R4 | `block_not_available` or "Could not find tx effect" after a reorg (#25206, #24765) | Possible, transient | Receipt-polling or deposit-claim errors that clear on retry. Persistent ones are a node problem: report upstream |
 | R5 | Fee-quote rejection (#25344) | Likely when fees move | `maxFeesPerGas … must be ≥ gasFees` despite `withFeeHeadroom`: raise the padding |
@@ -313,7 +316,9 @@ check 1 is the only thing that notices the node moving.
     alternatives on record are waiting for the node to reach 5.2.0, or pinning
     to the node's version. The owner rejected the pin on 2026-09-26.
 - **Stage 2 fails with a transient node error (R3, R4) or a fee-quote rejection
-  (R5).** Re-run Stage 2 alone, as "Re-run semantics" describes. The reused
+  (R5).** Re-run Stage 2 alone, as "Re-run semantics" describes (make sure
+  `ZERACLE_ALLOW_UNVERIFIED_FPC` is not set in your shell: that command runs
+  outside the script, which is what clears it). The reused
   `DEPLOYER_ACCOUNT_FILE` and pending claim make it safe. For R5, raise the fee
   padding first.
 - **After deploy, user account deploys fail on fee payment.** Re-run
@@ -374,8 +379,11 @@ underlying problem:
 - If **Stage 2** fails, `v1-l1`'s outputs from Stage 1 are untouched;
   re-running the full script re-does Stage 1 too (see above) unless you
   invoke `stage_l2_deploy`'s underlying command directly:
-  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... DEPLOY_TX_TIMEOUT_SECS=600 ZERACLE_COMPLIANCE=off yarn deploy:clean`
-  (see "Deployer account" above — reusing the same `DEPLOYER_ACCOUNT_FILE`
+  `cd v1-l2 && DEPLOYER_ACCOUNT_FILE=../deployments/testnet/deployer-account.json FEE_CUSTODIAN_ACCOUNT_FILE=../deployments/testnet/fee-custodian-account.json AZTEC_RPC_HOST=... L1_RPC_URL=... L1_DEPLOYER_PRIVATE_KEY=... L1_FEE_JUICE_PORTAL_ADDRESS=... L1_TOKEN_PORTAL=... L1_TREASURY=... L1_COLLATERAL_RESERVE=... L1_NETWORK_FUND=... DEPLOY_TX_TIMEOUT_SECS=600 ETH_CHAIN_ID=11155111 ZERACLE_COMPLIANCE=off yarn deploy:clean`
+  (the same variables `stage_l2_deploy` passes; take the L1 addresses from
+  Stage 1's `v1-l1/deployments/*-testnet.json`). Run it from a shell where
+  `ZERACLE_ALLOW_UNVERIFIED_FPC` is unset: outside the script nothing clears
+  it, and set to `1` it skips `deploy.ts`'s own canonical-FPC abort (see "Deployer account" above — reusing the same `DEPLOYER_ACCOUNT_FILE`
   is what makes this safe to repeat). If deploy succeeds but the bridge
   wiring assertion fails afterward, retry just that step with
   `ETH_RPC_URL=... DEPLOYER_PRIVATE_KEY=... make -C v1-l1 wire-bridge-testnet`.
