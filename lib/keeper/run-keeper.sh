@@ -16,26 +16,26 @@
 # skim() is deliberately NOT a step (ZER-18, owner decision 2026-09-24).
 # LiquidityPool.skim() sells the most-overweight leg for the fee token and
 # sends the proceeds to the CollateralReserve when NAV is ABOVE its high-water
-# mark — the opposite of cushion(). It cannot succeed on any environment
-# today, for three independent reasons (v1-l1):
-#   1. No router is whitelisted: skim() reverts RouterNotWhitelisted
-#      (LiquidityPool.sol:1208) and no deploy script calls setSkimRouter (:1220).
-#   2. The high-water mark is never armed (hwmPerShare == 0, ZER-31), so
-#      cappedAssetValueUsd() returns V uncapped (:542) and excessUsd() (:551) is
-#      always 0 — BelowSkimFloor (:1211) even with a router.
-#   3. setSkimParams (:1229) is never called, so skimMaxSlippageBps is 0: minOut
-#      is the full oracle value and any swap with fees or price impact reverts
-#      SkimSlippageTooHigh (CappedNavLib.sol:197).
-# Measured on the Pi 2026-09-24: hwmPerShare 0, excessUsd 0, all skim params 0,
-# skimRouters(MockDexAggregator) false. Since the G3 handover the pool owner is
-# the GovernanceAuthority, so fixing 1 and 3 on a live chain is an authority
-# execute() call — a timelock proposal once the admin phase has ended.
-# Revisit once ZER-31 arms the mark AND a router is chosen — together with
-# FeeConverter's, which is deferred for the same reason. MockDexAggregator's
+# mark — the opposite of cushion(). When ZER-18 was decided it could not
+# succeed anywhere, for three independent reasons (v1-l1):
+#   1. No router was whitelisted (skim() reverts RouterNotWhitelisted).
+#   2. The high-water mark was never armed (hwmPerShare == 0), so excessUsd()
+#      is always 0 and skim() reverts BelowSkimFloor even with a router.
+#   3. setSkimParams was never called, so skimMaxSlippageBps is 0 and any swap
+#      with fees or price impact reverts SkimSlippageTooHigh.
+# ZER-31 closes all three on a FRESH deploy: DeployLocal.s.sol calls
+# initialiseHwm(), setSkimRouter(MockDexAggregator, true) and
+# setSkimParams(1 days, 100e18, 100). A chain deployed before that (the Pi,
+# measured 2026-09-26: hwmPerShare 0, all skim params 0,
+# skimRouters(MockDexAggregator) false) stays unarmed until the owner runs
+# v1-l1 `make arm-capped-nav`, which goes through GovernanceAuthority.execute
+# (a timelock batch once the admin phase has ended).
+# Adding skim() here is still an owner call: revisit ZER-18, together with
+# FeeConverter's router, which ZER-18 deferred for the same reason. MockDexAggregator's
 # swap() (pull tokenIn from caller, mint tokenOut to caller) is compatible with
-# skim()'s balance-delta check, so the sandbox needs no new mock when it lands —
-# provided swapData calls its swap(address,address,uint256,uint256,bytes)
-# selector directly (its fallback re-enters as itself, so the pool gets nothing).
+# skim()'s balance-delta check, provided swapData calls its
+# swap(address,address,uint256,uint256,bytes) selector directly (its fallback
+# re-enters as itself, so the pool gets nothing).
 #
 # Pending relays (final review Important 2): a flush's L2->L1 messages can
 # only be relayed once its epoch is proven on L1, which on testnet often
