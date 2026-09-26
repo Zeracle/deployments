@@ -392,7 +392,10 @@ underlying problem:
   Stage 1's `v1-l1/deployments/*-testnet.json`). Run it from a shell where
   `ZERACLE_ALLOW_UNVERIFIED_FPC` is unset: outside the script nothing clears
   it, and set to `1` it skips `deploy.ts`'s own canonical-FPC abort (see "Deployer account" above — reusing the same `DEPLOYER_ACCOUNT_FILE`
-  is what makes this safe to repeat). If deploy succeeds but the bridge
+  is what makes this safe to repeat). Run by hand, this skips the script's
+  post-deploy checks, so before wiring check `deployment.json` yourself:
+  `jq '{feeDistributionFlushMinimumEnforced, feeDistributionFlushMinimum}' v1-l2/deployment.json`
+  must show `true` and `"10000000000000000000"` (ZER-32). If deploy succeeds but the bridge
   wiring assertion fails afterward, retry just that step with
   `ETH_RPC_URL=... DEPLOYER_PRIVATE_KEY=... make -C v1-l1 wire-bridge-testnet`.
 - If **Stage 3** fails (e.g. `.env.testnet` missing), Stages 1-2's on-chain
